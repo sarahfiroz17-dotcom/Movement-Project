@@ -15,6 +15,10 @@ node_modules/
 frontend/dist/
 frontend/.vite/
 
+# Uploaded data files
+backend/uploads/*.csv
+backend/uploads/*.zip
+
 # Database
 *.db
 *.sqlite
