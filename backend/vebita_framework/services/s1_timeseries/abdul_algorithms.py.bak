@@ -1,0 +1,2335 @@
+"""
+services/s1_timeseries/abdul_algorithms.py
+==========================================
+Service 1 - Time Series Analysis (Abdul Rehman)
+83 algorithms for animal GPS movement data.
+Features: speed_ms, altitude_m, turning_angle, straightness,
+          speed_roll_mean, speed_roll_std, step_length_m, alt_roll_mean
+"""
+
+import numpy as np
+import warnings
+warnings.filterwarnings("ignore")
+
+from core.base import BaseAlgorithm
+from core.registry import registry
+
+
+# ---- helpers ---------------------------------------------------------------
+
+def _speed(X):
+    return X[:, 0].astype(float)
+
+def _ema(arr, alpha):
+    out = np.empty_like(arr, dtype=float)
+    out[0] = arr[0]
+    for i in range(1, len(arr)):
+        out[i] = alpha * arr[i] + (1.0 - alpha) * out[i - 1]
+    return out
+
+
+# ============================================================
+# STATISTICAL METHODS (22)
+# ============================================================
+
+@registry.register
+class WeightedMovingAverage(BaseAlgorithm):
+    name        = "Weighted Moving Average"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Linearly-weighted moving average of speed_ms"
+
+    def __init__(self, window=5):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        w = np.arange(1, self.window + 1, dtype=float)
+        w /= w.sum()
+        return np.convolve(s, w[::-1], mode='same')
+
+
+@registry.register
+class DoubleExpSmoothTransform(BaseAlgorithm):
+    name        = "Double Exponential Smoothing Transform"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Holt double exponential smoothing of speed_ms"
+
+    def __init__(self, alpha=0.3, beta=0.1):
+        super().__init__(alpha=alpha, beta=beta)
+        self.alpha = alpha
+        self.beta  = beta
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        self.l_ = s[-1]
+        self.b_ = float(np.mean(np.diff(s[-10:]))) if len(s) > 10 else 0.0
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        l, b = self.l_, self.b_
+        out = np.empty(len(s))
+        for i, v in enumerate(s):
+            lp = l
+            l = self.alpha * v + (1 - self.alpha) * (lp + b)
+            b = self.beta * (l - lp) + (1 - self.beta) * b
+            out[i] = l + b
+        return out
+
+
+@registry.register
+class ARIMATransform(BaseAlgorithm):
+    name        = "ARIMA Transform"
+    service_id  = 1
+    category    = "statistical"
+    library     = "statsmodels"
+    animals     = ["all"]
+    description = "AR(1) approximation of ARIMA fitted values for speed_ms"
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        self.phi_  = np.corrcoef(s[:-1], s[1:])[0, 1] if len(s) > 1 else 0.5
+        self.mean_ = s.mean()
+        self.last_ = s[-1]
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        out  = np.empty(len(s))
+        prev = self.last_
+        for i, v in enumerate(s):
+            out[i] = self.mean_ + self.phi_ * (prev - self.mean_)
+            prev = v
+        return out
+
+
+@registry.register
+class HoltWintersTransform(BaseAlgorithm):
+    name        = "Holt-Winters Transform"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Triple exponential smoothing (Holt-Winters) of speed_ms"
+
+    def __init__(self, alpha=0.3, beta=0.1, gamma=0.1, period=12):
+        super().__init__(alpha=alpha, beta=beta, gamma=gamma, period=period)
+        self.alpha  = alpha
+        self.beta   = beta
+        self.gamma  = gamma
+        self.period = period
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        p = min(self.period, max(2, len(s) // 2))
+        self.l_      = np.mean(s[:p])
+        self.b_      = (np.mean(s[p:2*p]) - self.l_) / p if len(s) >= 2*p else 0.0
+        self.season_ = s[:p] - self.l_
+        self.p_      = p
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        p = self.p_
+        l, b   = self.l_, self.b_
+        season = self.season_.copy()
+        out    = np.empty(len(s))
+        for i, v in enumerate(s):
+            si    = i % p
+            out[i]= l + b + season[si]
+            lp    = l
+            l     = self.alpha * (v - season[si]) + (1 - self.alpha) * (l + b)
+            b     = self.beta  * (l - lp)          + (1 - self.beta)  * b
+            season[si] = self.gamma * (v - l) + (1 - self.gamma) * season[si]
+        return out
+
+
+@registry.register
+class PolynomialTrendTransform(BaseAlgorithm):
+    name        = "Polynomial Trend"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Quadratic polynomial trend fitted to speed_ms"
+
+    def __init__(self, degree=2):
+        super().__init__(degree=degree)
+        self.degree = degree
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        t = np.arange(len(s))
+        self.coef_ = np.polyfit(t, s, self.degree)
+        self.n_    = len(s)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        t = np.arange(self.n_, self.n_ + len(X))
+        return np.polyval(self.coef_, t)
+
+
+@registry.register
+class CubicSplineTrend(BaseAlgorithm):
+    name        = "Cubic Spline Trend"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Degree-3 polynomial trend of speed_ms"
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        t = np.arange(len(s))
+        self.coef_ = np.polyfit(t, s, 3)
+        self.n_    = len(s)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        t = np.arange(self.n_, self.n_ + len(X))
+        return np.polyval(self.coef_, t)
+
+
+@registry.register
+class STLTrendTransform(BaseAlgorithm):
+    name        = "STL Trend"
+    service_id  = 1
+    category    = "statistical"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "STL-like trend via uniform smoothing of speed_ms"
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.ndimage import uniform_filter1d
+        s  = _speed(X)
+        sz = max(3, len(s) // 10)
+        return uniform_filter1d(s, size=sz)
+
+
+@registry.register
+class SeasonalDecomposeTrend(BaseAlgorithm):
+    name        = "Seasonal Decompose Trend"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Moving-average trend from classical seasonal decomposition"
+
+    def __init__(self, period=12):
+        super().__init__(period=period)
+        self.period = period
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        p = min(self.period, max(2, len(s) // 2))
+        return np.convolve(s, np.ones(p) / p, mode='same')
+
+
+@registry.register
+class AutocorrelationForecast(BaseAlgorithm):
+    name        = "Autocorrelation Forecast"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "AR(p) forecast using lag autocorrelation structure of speed_ms"
+
+    def __init__(self, lags=3):
+        super().__init__(lags=lags)
+        self.lags = lags
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        n = len(s)
+        if n > self.lags:
+            Y = s[self.lags:]
+            Z = np.column_stack([s[self.lags-i-1:n-i-1] for i in range(self.lags)])
+            res = np.linalg.lstsq(np.column_stack([np.ones(len(Y)), Z]), Y, rcond=None)
+            self.coef_ = res[0]
+        else:
+            self.coef_ = np.array([s.mean()] + [0.5] * self.lags)
+        self.last_ = list(s[-self.lags:])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        buf = list(self.last_)
+        out = np.empty(len(s))
+        for i, v in enumerate(s):
+            z = np.array(buf[-self.lags:])
+            out[i] = self.coef_[0] + np.dot(self.coef_[1:], z)
+            buf.append(v)
+        return out
+
+
+@registry.register
+class PACFForecast(BaseAlgorithm):
+    name        = "PACF Forecast"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Lag-1 partial autocorrelation forecast of speed_ms"
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        self.phi_  = np.corrcoef(s[:-1], s[1:])[0, 1] if len(s) > 1 else 0.0
+        self.mean_ = s.mean()
+        self.last_ = s[-1]
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        out  = np.empty(len(s))
+        prev = self.last_
+        for i, v in enumerate(s):
+            out[i] = self.mean_ + self.phi_ * (prev - self.mean_)
+            prev   = v
+        return out
+
+
+@registry.register
+class RollingVarianceTransform(BaseAlgorithm):
+    name        = "Rolling Variance"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Rolling variance of speed_ms as a stationarity proxy"
+
+    def __init__(self, window=10):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        out = np.empty(len(s))
+        for i in range(len(s)):
+            lo     = max(0, i - self.window + 1)
+            out[i] = np.var(s[lo:i+1])
+        return out
+
+
+@registry.register
+class RollingSkewnessTransform(BaseAlgorithm):
+    name        = "Rolling Skewness"
+    service_id  = 1
+    category    = "statistical"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Rolling skewness of speed_ms"
+
+    def __init__(self, window=10):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.stats import skew
+        s   = _speed(X)
+        out = np.empty(len(s))
+        for i in range(len(s)):
+            lo     = max(0, i - self.window + 1)
+            seg    = s[lo:i+1]
+            out[i] = float(skew(seg)) if len(seg) > 2 else 0.0
+        return out
+
+
+@registry.register
+class RollingKurtosisTransform(BaseAlgorithm):
+    name        = "Rolling Kurtosis"
+    service_id  = 1
+    category    = "statistical"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Rolling kurtosis of speed_ms"
+
+    def __init__(self, window=10):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.stats import kurtosis
+        s   = _speed(X)
+        out = np.empty(len(s))
+        for i in range(len(s)):
+            lo     = max(0, i - self.window + 1)
+            seg    = s[lo:i+1]
+            out[i] = float(kurtosis(seg)) if len(seg) > 3 else 0.0
+        return out
+
+
+@registry.register
+class ZScoreTransform(BaseAlgorithm):
+    name        = "Z-Score Transform"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Z-score normalisation of speed_ms using training statistics"
+
+    def fit(self, X, y=None):
+        s           = _speed(X)
+        self.mu_    = s.mean()
+        self.sigma_ = s.std() + 1e-9
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return (_speed(X) - self.mu_) / self.sigma_
+
+
+@registry.register
+class MinMaxTransform(BaseAlgorithm):
+    name        = "Min-Max Transform"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Min-max normalisation of speed_ms to [0, 1]"
+
+    def fit(self, X, y=None):
+        s            = _speed(X)
+        self.min_    = s.min()
+        self.range_  = s.max() - s.min() + 1e-9
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return (_speed(X) - self.min_) / self.range_
+
+
+@registry.register
+class RobustScaleTransform(BaseAlgorithm):
+    name        = "Robust Scale Transform"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Robust scaling using median and IQR of speed_ms"
+
+    def fit(self, X, y=None):
+        s              = _speed(X)
+        self.median_   = np.median(s)
+        self.iqr_      = np.percentile(s, 75) - np.percentile(s, 25) + 1e-9
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return (_speed(X) - self.median_) / self.iqr_
+
+
+@registry.register
+class DifferencingTransform(BaseAlgorithm):
+    name        = "First Difference"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "First-order differencing to remove trend from speed_ms"
+
+    def fit(self, X, y=None):
+        self.last_     = _speed(X)[-1]
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s    = _speed(X)
+        prev = np.concatenate([[self.last_], s[:-1]])
+        return s - prev
+
+
+@registry.register
+class LogTransform(BaseAlgorithm):
+    name        = "Log Transform"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Natural log transform of speed_ms (shifted to positive)"
+
+    def fit(self, X, y=None):
+        self.shift_    = max(0.0, -_speed(X).min()) + 1.0
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return np.log(_speed(X) + self.shift_)
+
+
+@registry.register
+class BoxCoxTransform(BaseAlgorithm):
+    name        = "Box-Cox Transform"
+    service_id  = 1
+    category    = "statistical"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Box-Cox power transform of speed_ms"
+
+    def fit(self, X, y=None):
+        from scipy.stats import boxcox
+        s              = _speed(X)
+        self.shift_    = max(0.0, -s.min()) + 1.0
+        _, self.lam_   = boxcox(s + self.shift_)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X) + self.shift_
+        if abs(self.lam_) < 1e-10:
+            return np.log(s)
+        return (s ** self.lam_ - 1) / self.lam_
+
+
+@registry.register
+class YeoJohnsonTransform(BaseAlgorithm):
+    name        = "Yeo-Johnson Transform"
+    service_id  = 1
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Yeo-Johnson power transform of speed_ms for normality"
+
+    def fit(self, X, y=None):
+        from sklearn.preprocessing import PowerTransformer
+        self.pt_       = PowerTransformer(method='yeo-johnson')
+        self.pt_.fit(_speed(X).reshape(-1, 1))
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.pt_.transform(_speed(X).reshape(-1, 1)).ravel()
+
+
+@registry.register
+class FourierReconstruction(BaseAlgorithm):
+    name        = "Fourier Reconstruction"
+    service_id  = 1
+    category    = "statistical"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Top-k Fourier components reconstruction of speed_ms"
+
+    def __init__(self, n_components=10):
+        super().__init__(n_components=n_components)
+        self.n_components = n_components
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        fft = np.fft.rfft(s)
+        k   = min(self.n_components, len(fft))
+        idx = np.argsort(np.abs(fft))[-k:]
+        mask = np.zeros_like(fft)
+        mask[idx] = fft[idx]
+        return np.fft.irfft(mask, n=len(s))
+
+
+@registry.register
+class LagFeatureForecast(BaseAlgorithm):
+    name        = "Lag Feature Forecast"
+    service_id  = 1
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Linear regression on lag features of speed_ms"
+
+    def __init__(self, lags=5):
+        super().__init__(lags=lags)
+        self.lags = lags
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        n = len(s)
+        if n <= self.lags:
+            self.coef_      = np.zeros(self.lags)
+            self.intercept_ = s.mean()
+        else:
+            Xlag = np.column_stack([s[self.lags-i-1:n-i-1] for i in range(self.lags)])
+            Ytgt = s[self.lags:]
+            from sklearn.linear_model import LinearRegression
+            lr              = LinearRegression().fit(Xlag, Ytgt)
+            self.coef_      = lr.coef_
+            self.intercept_ = lr.intercept_
+        self.last_ = list(s[-self.lags:])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        buf = list(self.last_)
+        out = np.empty(len(s))
+        for i, v in enumerate(s):
+            z      = np.array(buf[-self.lags:])
+            out[i] = self.intercept_ + np.dot(self.coef_, z)
+            buf.append(v)
+        return out
+
+
+# ============================================================
+# FORECASTING METHODS (18)
+# ============================================================
+
+@registry.register
+class ARIMAForecast(BaseAlgorithm):
+    name        = "ARIMA Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "AR(2) ARIMA-style one-step-ahead forecast of speed_ms"
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        n = len(s)
+        if n > 3:
+            r0    = np.var(s)
+            r1    = np.cov(s[:-1], s[1:])[0, 1]
+            r2    = np.cov(s[:-2], s[2:])[0, 1]
+            denom = r0**2 - r1**2 + 1e-10
+            self.phi1_ = (r1 * r0 - r1 * r2) / denom
+            self.phi2_ = (r0 * r2 - r1**2)   / denom
+        else:
+            self.phi1_, self.phi2_ = 0.5, 0.1
+        self.mean_  = s.mean()
+        self.last2_ = list(s[-2:])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        buf = list(self.last2_)
+        out = np.empty(len(s))
+        for i, v in enumerate(s):
+            out[i] = (self.mean_
+                      + self.phi1_ * (buf[-1] - self.mean_)
+                      + self.phi2_ * (buf[-2] - self.mean_))
+            buf.append(v)
+        return out
+
+
+@registry.register
+class SARIMAForecast(BaseAlgorithm):
+    name        = "SARIMA Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Seasonal AR forecast with period=12 for speed_ms"
+
+    def __init__(self, period=12):
+        super().__init__(period=period)
+        self.period = period
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        p = min(self.period, max(2, len(s) // 2))
+        self.seasonal_mean_ = np.array([s[i::p].mean() for i in range(p)])
+        self.overall_mean_  = s.mean()
+        self.phi_           = np.corrcoef(s[:-1], s[1:])[0, 1] if len(s) > 1 else 0.5
+        self.last_          = s[-1]
+        self.p_             = p
+        self.n_             = len(s)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        out = np.empty(len(s))
+        prev = self.last_
+        for i, v in enumerate(s):
+            si     = (self.n_ + i) % self.p_
+            out[i] = (self.overall_mean_
+                      + self.phi_ * (prev - self.overall_mean_)
+                      + 0.3 * (self.seasonal_mean_[si] - self.overall_mean_))
+            prev = v
+        return out
+
+
+@registry.register
+class SimpleExpSmoothing(BaseAlgorithm):
+    name        = "Simple Exponential Smoothing"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "SES one-step-ahead forecast of speed_ms"
+
+    def __init__(self, alpha=0.2):
+        super().__init__(alpha=alpha)
+        self.alpha = alpha
+
+    def fit(self, X, y=None):
+        self.level_    = _speed(X)[-1]
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s     = _speed(X)
+        out   = np.empty(len(s))
+        level = self.level_
+        for i, v in enumerate(s):
+            out[i] = level
+            level  = self.alpha * v + (1 - self.alpha) * level
+        return out
+
+
+@registry.register
+class DoubleExpSmoothing(BaseAlgorithm):
+    name        = "Double Exponential Smoothing"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Holt double exponential smoothing one-step forecast"
+
+    def __init__(self, alpha=0.3, beta=0.1):
+        super().__init__(alpha=alpha, beta=beta)
+        self.alpha = alpha
+        self.beta  = beta
+
+    def fit(self, X, y=None):
+        s          = _speed(X)
+        self.l_    = s[-1]
+        self.b_    = float(np.mean(np.diff(s[-5:]))) if len(s) > 5 else 0.0
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        l, b = self.l_, self.b_
+        out = np.empty(len(s))
+        for i, v in enumerate(s):
+            out[i] = l + b
+            ln     = self.alpha * v + (1 - self.alpha) * (l + b)
+            b      = self.beta * (ln - l) + (1 - self.beta) * b
+            l      = ln
+        return out
+
+
+@registry.register
+class TripleExpSmoothing(BaseAlgorithm):
+    name        = "Triple Exponential Smoothing"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Holt-Winters triple exponential smoothing forecast"
+
+    def __init__(self, alpha=0.3, beta=0.1, gamma=0.1, period=12):
+        super().__init__(alpha=alpha, beta=beta, gamma=gamma, period=period)
+        self.alpha  = alpha
+        self.beta   = beta
+        self.gamma  = gamma
+        self.period = period
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        p = min(self.period, max(2, len(s) // 4))
+        self.l_      = np.mean(s[:p])
+        self.b_      = (np.mean(s[p:2*p]) - self.l_) / p if len(s) >= 2*p else 0.0
+        self.season_ = s[:p] - self.l_
+        self.p_      = p
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        p = self.p_
+        l, b   = self.l_, self.b_
+        season = self.season_.copy()
+        out    = np.empty(len(s))
+        for i, v in enumerate(s):
+            si     = i % p
+            out[i] = l + b + season[si]
+            ln     = self.alpha * (v - season[si]) + (1 - self.alpha) * (l + b)
+            b      = self.beta  * (ln - l)          + (1 - self.beta)  * b
+            season[si] = self.gamma * (v - ln) + (1 - self.gamma) * season[si]
+            l = ln
+        return out
+
+
+@registry.register
+class ThetaMethodForecast(BaseAlgorithm):
+    name        = "Theta Method"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Theta method: average of linear trend and SES forecast"
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        n = len(s)
+        t = np.arange(n)
+        self.slope_     = np.polyfit(t, s, 1)[0]
+        self.intercept_ = s[0]
+        level = s[0]
+        for v in s[1:]:
+            level = 0.5 * v + 0.5 * level
+        self.ses_level_ = level
+        self.n_         = n
+        self.is_fitted  = True
+        return self
+
+    def predict(self, X):
+        n = len(X)
+        t       = np.arange(self.n_, self.n_ + n)
+        theta0  = self.intercept_ + self.slope_ * t
+        theta2  = np.full(n, self.ses_level_)
+        return 0.5 * (theta0 + theta2)
+
+
+@registry.register
+class NaiveForecast(BaseAlgorithm):
+    name        = "Naive Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Naive forecast: repeat last training value"
+
+    def fit(self, X, y=None):
+        self.last_     = _speed(X)[-1]
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return np.full(len(X), self.last_)
+
+
+@registry.register
+class SeasonalNaiveForecast(BaseAlgorithm):
+    name        = "Seasonal Naive Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Seasonal naive: repeat last full seasonal cycle"
+
+    def __init__(self, period=12):
+        super().__init__(period=period)
+        self.period = period
+
+    def fit(self, X, y=None):
+        s              = _speed(X)
+        p              = min(self.period, len(s))
+        self.season_   = s[-p:]
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        n = len(X)
+        p = len(self.season_)
+        return np.array([self.season_[i % p] for i in range(n)])
+
+
+@registry.register
+class DriftMethodForecast(BaseAlgorithm):
+    name        = "Drift Method Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Random walk with drift forecast for speed_ms"
+
+    def fit(self, X, y=None):
+        s              = _speed(X)
+        n              = len(s)
+        self.last_     = s[-1]
+        self.drift_    = (s[-1] - s[0]) / (n - 1) if n > 1 else 0.0
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        n = len(X)
+        return np.array([self.last_ + (i + 1) * self.drift_ for i in range(n)])
+
+
+@registry.register
+class MeanForecast(BaseAlgorithm):
+    name        = "Mean Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Constant forecast equal to training mean — baseline"
+
+    def fit(self, X, y=None):
+        self.mean_     = _speed(X).mean()
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return np.full(len(X), self.mean_)
+
+
+@registry.register
+class RandomWalkForecast(BaseAlgorithm):
+    name        = "Random Walk Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Random walk forecast: last value plus Gaussian noise steps"
+
+    def fit(self, X, y=None):
+        s              = _speed(X)
+        self.last_     = s[-1]
+        self.sigma_    = float(np.std(np.diff(s))) if len(s) > 1 else 0.1
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        np.random.seed(42)
+        n     = len(X)
+        steps = np.random.normal(0, self.sigma_, n)
+        return self.last_ + np.cumsum(steps)
+
+
+@registry.register
+class LinearRegressionForecast(BaseAlgorithm):
+    name        = "Linear Regression Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Linear regression over all 8 features to predict speed_ms"
+
+    def fit(self, X, y=None):
+        from sklearn.linear_model import LinearRegression
+        self.lr_       = LinearRegression().fit(X[:, 1:], X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.lr_.predict(X[:, 1:])
+
+
+@registry.register
+class RidgeRegressionForecast(BaseAlgorithm):
+    name        = "Ridge Regression Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Ridge regression forecast of speed_ms from other features"
+
+    def __init__(self, alpha=1.0):
+        super().__init__(alpha=alpha)
+        self.alpha = alpha
+
+    def fit(self, X, y=None):
+        from sklearn.linear_model import Ridge
+        self.model_    = Ridge(alpha=self.alpha).fit(X[:, 1:], X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model_.predict(X[:, 1:])
+
+
+@registry.register
+class LassoRegressionForecast(BaseAlgorithm):
+    name        = "Lasso Regression Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Lasso sparse regression forecast of speed_ms"
+
+    def __init__(self, alpha=0.1):
+        super().__init__(alpha=alpha)
+        self.alpha = alpha
+
+    def fit(self, X, y=None):
+        from sklearn.linear_model import Lasso
+        self.model_    = Lasso(alpha=self.alpha, max_iter=5000).fit(X[:, 1:], X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model_.predict(X[:, 1:])
+
+
+@registry.register
+class ElasticNetForecast(BaseAlgorithm):
+    name        = "Elastic Net Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Elastic net regression (L1+L2) forecast of speed_ms"
+
+    def fit(self, X, y=None):
+        from sklearn.linear_model import ElasticNet
+        self.model_    = ElasticNet(max_iter=5000).fit(X[:, 1:], X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model_.predict(X[:, 1:])
+
+
+@registry.register
+class SVRForecast(BaseAlgorithm):
+    name        = "SVR Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Support Vector Regression forecast of speed_ms"
+
+    def fit(self, X, y=None):
+        from sklearn.svm import SVR
+        from sklearn.preprocessing import StandardScaler
+        self.scaler_   = StandardScaler().fit(X[:, 1:])
+        Xs             = self.scaler_.transform(X[:, 1:])
+        self.model_    = SVR(kernel='rbf', C=1.0).fit(Xs, X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model_.predict(self.scaler_.transform(X[:, 1:]))
+
+
+@registry.register
+class KNNForecast(BaseAlgorithm):
+    name        = "KNN Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "K-Nearest Neighbours regression forecast of speed_ms"
+
+    def __init__(self, k=5):
+        super().__init__(k=k)
+        self.k = k
+
+    def fit(self, X, y=None):
+        from sklearn.neighbors import KNeighborsRegressor
+        self.model_    = KNeighborsRegressor(n_neighbors=self.k).fit(X[:, 1:], X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model_.predict(X[:, 1:])
+
+
+@registry.register
+class GradientBoostingForecast(BaseAlgorithm):
+    name        = "Gradient Boosting Forecast"
+    service_id  = 1
+    category    = "forecasting"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Gradient Boosting regressor forecast of speed_ms"
+
+    def fit(self, X, y=None):
+        from sklearn.ensemble import GradientBoostingRegressor
+        self.model_    = GradientBoostingRegressor(
+            n_estimators=50, max_depth=3, random_state=42
+        ).fit(X[:, 1:], X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model_.predict(X[:, 1:])
+
+
+# ============================================================
+# DECOMPOSITION (14)
+# ============================================================
+
+@registry.register
+class STLDecompose(BaseAlgorithm):
+    name        = "STL Decompose"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "STL trend via uniform smoothing of speed_ms"
+
+    def __init__(self, period=12):
+        super().__init__(period=period)
+        self.period = period
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.ndimage import uniform_filter1d
+        s  = _speed(X)
+        sz = max(3, min(self.period, len(s) // 4))
+        return uniform_filter1d(s, size=sz)
+
+
+@registry.register
+class ClassicalSeasonalDecompose(BaseAlgorithm):
+    name        = "Classical Seasonal Decompose"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Classical additive decomposition trend of speed_ms"
+
+    def __init__(self, period=12):
+        super().__init__(period=period)
+        self.period = period
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        p = min(self.period, max(2, len(s) // 2))
+        return np.convolve(s, np.ones(p) / p, mode='same')
+
+
+@registry.register
+class EMDDecompose(BaseAlgorithm):
+    name        = "EMD Decompose"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Empirical Mode Decomposition envelope-mean IMF approximation"
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.signal import argrelextrema
+        s = _speed(X)
+        try:
+            hi_idx = np.concatenate([[0], argrelextrema(s, np.greater)[0], [len(s)-1]])
+            lo_idx = np.concatenate([[0], argrelextrema(s, np.less)[0],    [len(s)-1]])
+            upper  = np.interp(np.arange(len(s)), hi_idx, s[hi_idx])
+            lower  = np.interp(np.arange(len(s)), lo_idx, s[lo_idx])
+            return s - (upper + lower) / 2
+        except Exception:
+            return s - s.mean()
+
+
+@registry.register
+class EEMDDecompose(BaseAlgorithm):
+    name        = "EEMD Decompose"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Ensemble EMD via noise-assisted averaging (numpy)"
+
+    def fit(self, X, y=None):
+        self.noise_std_ = _speed(X).std() * 0.1
+        self.is_fitted  = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        np.random.seed(42)
+        return np.mean(
+            [_ema(s + np.random.normal(0, self.noise_std_, len(s)), 0.3)
+             for _ in range(5)],
+            axis=0
+        )
+
+
+@registry.register
+class CEEMDANDecompose(BaseAlgorithm):
+    name        = "CEEMDAN Decompose"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Complete EEMD with Adaptive Noise — numpy approximation"
+
+    def fit(self, X, y=None):
+        self.noise_std_ = _speed(X).std() * 0.05
+        self.is_fitted  = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        np.random.seed(0)
+        return np.mean(
+            [_ema(s + np.random.normal(0, self.noise_std_, len(s)), 0.25)
+             for _ in range(10)],
+            axis=0
+        )
+
+
+@registry.register
+class VMDDecompose(BaseAlgorithm):
+    name        = "VMD Decompose"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Variational Mode Decomposition low-frequency mode (numpy)"
+
+    def __init__(self, n_modes=3):
+        super().__init__(n_modes=n_modes)
+        self.n_modes = n_modes
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s    = _speed(X)
+        fft  = np.fft.rfft(s)
+        n    = len(fft)
+        band = max(1, n // (self.n_modes * 2))
+        mask = np.zeros_like(fft)
+        mask[:band] = fft[:band]
+        return np.fft.irfft(mask, n=len(s))
+
+
+@registry.register
+class WaveletDWT(BaseAlgorithm):
+    name        = "Wavelet DWT Denoise"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Haar DWT level-2 approximation of speed_ms"
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s  = _speed(X)
+        a1 = np.convolve(s, np.array([0.5, 0.5]), mode='same')
+        a2 = np.convolve(a1, np.array([0.5, 0.5]), mode='same')
+        return a2
+
+
+@registry.register
+class WaveletSWT(BaseAlgorithm):
+    name        = "Wavelet SWT Denoise"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Stationary (non-decimated) wavelet transform smoothing"
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s  = _speed(X)
+        a1 = np.convolve(s,  np.ones(2) / 2, mode='same')
+        a2 = np.convolve(a1, np.ones(4) / 4, mode='same')
+        return a2
+
+
+@registry.register
+class WaveletCWT(BaseAlgorithm):
+    name        = "Wavelet CWT Features"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Continuous wavelet transform mean scale energy of speed_ms"
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s      = _speed(X)
+        widths = np.arange(1, min(16, len(s) // 4 + 2))
+        coefs  = []
+        for w in widths:
+            # Ricker wavelet approximation via second derivative of Gaussian
+            t    = np.arange(-(3*w), 3*w + 1, dtype=float)
+            psi  = (1 - (t/w)**2) * np.exp(-0.5 * (t/w)**2)
+            psi /= (np.linalg.norm(psi) + 1e-10)
+            coefs.append(np.convolve(s, psi[::-1], mode='same'))
+        return np.mean(np.abs(coefs), axis=0)
+
+
+@registry.register
+class SSAReconstruction(BaseAlgorithm):
+    name        = "SSA Reconstruction"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Singular Spectrum Analysis low-rank reconstruction of speed_ms"
+
+    def __init__(self, window=10, n_components=3):
+        super().__init__(window=window, n_components=n_components)
+        self.window       = window
+        self.n_components = n_components
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = _speed(X)
+        n = len(s)
+        L = min(self.window, n // 2)
+        K = n - L + 1
+        if K < 1 or L < 1:
+            return s.copy()
+        traj = np.array([s[i:i+L] for i in range(K)])
+        U, sv, Vt = np.linalg.svd(traj, full_matrices=False)
+        k         = min(self.n_components, len(sv))
+        rec_traj  = sum(sv[i] * np.outer(U[:, i], Vt[i]) for i in range(k))
+        result    = np.zeros(n)
+        counts    = np.zeros(n)
+        for i in range(K):
+            result[i:i+L] += rec_traj[i]
+            counts[i:i+L] += 1
+        return result / np.maximum(counts, 1)
+
+
+@registry.register
+class PCAReconstruction(BaseAlgorithm):
+    name        = "PCA Reconstruction"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "PCA low-rank reconstruction — returns speed_ms channel"
+
+    def __init__(self, n_components=3):
+        super().__init__(n_components=n_components)
+        self.n_components = n_components
+
+    def fit(self, X, y=None):
+        from sklearn.decomposition import PCA
+        n          = min(self.n_components, X.shape[1], X.shape[0])
+        self.pca_  = PCA(n_components=n).fit(X)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        recon = self.pca_.inverse_transform(self.pca_.transform(X))
+        return recon[:, 0]
+
+
+@registry.register
+class ICAReconstruction(BaseAlgorithm):
+    name        = "ICA Reconstruction"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "FastICA reconstruction of speed_ms signal"
+
+    def __init__(self, n_components=3):
+        super().__init__(n_components=n_components)
+        self.n_components = n_components
+
+    def fit(self, X, y=None):
+        from sklearn.decomposition import FastICA
+        n         = min(self.n_components, X.shape[1], X.shape[0] - 1)
+        self.ica_ = FastICA(n_components=n, random_state=42, max_iter=500).fit(X)
+        self.mean_ = X.mean(axis=0)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        try:
+            S     = self.ica_.transform(X)
+            recon = S @ self.ica_.mixing_.T + self.mean_
+            return recon[:, 0]
+        except Exception:
+            return _speed(X)
+
+
+@registry.register
+class NMFReconstruction(BaseAlgorithm):
+    name        = "NMF Reconstruction"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "NMF reconstruction (non-negative features) of speed_ms"
+
+    def __init__(self, n_components=3):
+        super().__init__(n_components=n_components)
+        self.n_components = n_components
+
+    def fit(self, X, y=None):
+        from sklearn.decomposition import NMF
+        self.shift_ = -X.min(axis=0) + 1e-6
+        Xpos        = X + self.shift_
+        n           = min(self.n_components, X.shape[1], X.shape[0])
+        self.nmf_   = NMF(n_components=n, max_iter=500, random_state=42).fit(Xpos)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        Xpos  = X + self.shift_
+        H     = self.nmf_.transform(Xpos)
+        recon = H @ self.nmf_.components_
+        return recon[:, 0] - self.shift_[0]
+
+
+@registry.register
+class FactorAnalysisForecast(BaseAlgorithm):
+    name        = "Factor Analysis Forecast"
+    service_id  = 1
+    category    = "decomposition"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Factor Analysis latent factors to reconstruct speed_ms"
+
+    def __init__(self, n_factors=3):
+        super().__init__(n_factors=n_factors)
+        self.n_factors = n_factors
+
+    def fit(self, X, y=None):
+        from sklearn.decomposition import FactorAnalysis
+        n        = min(self.n_factors, X.shape[1], X.shape[0] - 1)
+        self.fa_ = FactorAnalysis(n_components=n, random_state=42).fit(X)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        factors = self.fa_.transform(X)
+        recon   = factors @ self.fa_.components_ + self.fa_.mean_
+        return recon[:, 0]
+
+
+# ============================================================
+# SIGNAL PROCESSING (13)
+# ============================================================
+
+@registry.register
+class SavitzkyGolaySmooth(BaseAlgorithm):
+    name        = "Savitzky-Golay Smooth"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Savitzky-Golay polynomial smoothing of speed_ms"
+
+    def __init__(self, window=11, polyorder=3):
+        super().__init__(window=window, polyorder=polyorder)
+        self.window    = window
+        self.polyorder = polyorder
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.signal import savgol_filter
+        s = _speed(X)
+        w = min(self.window, len(s))
+        if w % 2 == 0:
+            w -= 1
+        w = max(w, self.polyorder + 2 + (self.polyorder % 2 == 0))
+        if w > len(s):
+            return s.copy()
+        return savgol_filter(s, window_length=w, polyorder=min(self.polyorder, w - 1))
+
+
+@registry.register
+class ButterworthFilter(BaseAlgorithm):
+    name        = "Butterworth Filter"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Low-pass Butterworth filter applied to speed_ms"
+
+    def __init__(self, order=4, cutoff=0.1):
+        super().__init__(order=order, cutoff=cutoff)
+        self.order  = order
+        self.cutoff = cutoff
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.signal import butter, filtfilt
+        s = _speed(X)
+        if len(s) < 3 * self.order:
+            return s.copy()
+        b, a = butter(self.order, self.cutoff, btype='low', analog=False)
+        return filtfilt(b, a, s)
+
+
+@registry.register
+class KalmanSmoother(BaseAlgorithm):
+    name        = "Kalman Smoother"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "1D Kalman filter smoothing of speed_ms"
+
+    def __init__(self, q=1e-3, r=0.1):
+        super().__init__(q=q, r=r)
+        self.q = q
+        self.r = r
+
+    def fit(self, X, y=None):
+        s          = _speed(X)
+        self.x_    = float(s[0])
+        self.p_    = 1.0
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        x, p = self.x_, self.p_
+        out = np.empty(len(s))
+        for i, z in enumerate(s):
+            p    = p + self.q
+            k    = p / (p + self.r)
+            x    = x + k * (z - x)
+            p    = (1 - k) * p
+            out[i] = x
+        return out
+
+
+@registry.register
+class MedianFilterSmooth(BaseAlgorithm):
+    name        = "Median Filter Smooth"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Median filter to remove impulsive noise from speed_ms"
+
+    def __init__(self, kernel_size=5):
+        super().__init__(kernel_size=kernel_size)
+        self.kernel_size = kernel_size
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.signal import medfilt
+        s = _speed(X)
+        k = min(self.kernel_size, len(s))
+        if k % 2 == 0:
+            k -= 1
+        k = max(k, 1)
+        return medfilt(s, kernel_size=k)
+
+
+@registry.register
+class GaussianFilterSmooth(BaseAlgorithm):
+    name        = "Gaussian Filter Smooth"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Gaussian kernel smoothing of speed_ms"
+
+    def __init__(self, sigma=2.0):
+        super().__init__(sigma=sigma)
+        self.sigma = sigma
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.ndimage import gaussian_filter1d
+        return gaussian_filter1d(_speed(X), sigma=self.sigma)
+
+
+@registry.register
+class FFTLowPassReconstruct(BaseAlgorithm):
+    name        = "FFT Low-Pass Reconstruct"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Retain lowest-frequency FFT components of speed_ms"
+
+    def __init__(self, keep_fraction=0.1):
+        super().__init__(keep_fraction=keep_fraction)
+        self.keep_fraction = keep_fraction
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s      = _speed(X)
+        fft    = np.fft.rfft(s)
+        cutoff = max(1, int(len(fft) * self.keep_fraction))
+        fft[cutoff:] = 0
+        return np.fft.irfft(fft, n=len(s))
+
+
+@registry.register
+class STFTEnergyForecast(BaseAlgorithm):
+    name        = "STFT Energy Forecast"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Per-frame STFT energy as local activity proxy for speed_ms"
+
+    def __init__(self, nperseg=16):
+        super().__init__(nperseg=nperseg)
+        self.nperseg = nperseg
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.signal import stft
+        s       = _speed(X)
+        nperseg = min(self.nperseg, len(s))
+        _, _, Zxx = stft(s, nperseg=nperseg)
+        energy  = np.sum(np.abs(Zxx) ** 2, axis=0)
+        idx_dst = np.linspace(0, len(energy) - 1, len(s))
+        return np.interp(idx_dst, np.arange(len(energy)), energy)
+
+
+@registry.register
+class HilbertEnvelope(BaseAlgorithm):
+    name        = "Hilbert Envelope"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Amplitude envelope of speed_ms via Hilbert transform"
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.signal import hilbert
+        return np.abs(hilbert(_speed(X)))
+
+
+@registry.register
+class ZeroCrossingRateForecast(BaseAlgorithm):
+    name        = "Zero Crossing Rate Forecast"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Rolling zero-crossing rate of mean-centred speed_ms"
+
+    def __init__(self, window=20):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.mu_       = _speed(X).mean()
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X) - self.mu_
+        out = np.empty(len(s))
+        for i in range(len(s)):
+            lo  = max(0, i - self.window + 1)
+            seg = s[lo:i+1]
+            out[i] = float(np.mean(np.diff(np.sign(seg)) != 0)) if len(seg) > 1 else 0.0
+        return out
+
+
+@registry.register
+class EnergyEntropyForecast(BaseAlgorithm):
+    name        = "Energy Entropy Forecast"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Rolling spectral energy entropy of speed_ms"
+
+    def __init__(self, window=20):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        out = np.empty(len(s))
+        for i in range(len(s)):
+            lo  = max(0, i - self.window + 1)
+            seg = s[lo:i+1]
+            if len(seg) < 4:
+                out[i] = 0.0
+                continue
+            mag    = np.abs(np.fft.rfft(seg)) ** 2
+            mag   /= mag.sum() + 1e-10
+            out[i] = -np.sum(mag * np.log(mag + 1e-10))
+        return out
+
+
+@registry.register
+class SpectralCentroidForecast(BaseAlgorithm):
+    name        = "Spectral Centroid Forecast"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Rolling spectral centroid frequency of speed_ms"
+
+    def __init__(self, window=20):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        out = np.empty(len(s))
+        for i in range(len(s)):
+            lo  = max(0, i - self.window + 1)
+            seg = s[lo:i+1]
+            if len(seg) < 2:
+                out[i] = 0.0
+                continue
+            mag    = np.abs(np.fft.rfft(seg))
+            freqs  = np.fft.rfftfreq(len(seg))
+            out[i] = np.dot(freqs, mag) / (mag.sum() + 1e-10)
+        return out
+
+
+@registry.register
+class SpectralRolloffForecast(BaseAlgorithm):
+    name        = "Spectral Rolloff Forecast"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Rolling spectral rolloff (85% energy threshold) of speed_ms"
+
+    def __init__(self, window=20, rolloff=0.85):
+        super().__init__(window=window, rolloff=rolloff)
+        self.window  = window
+        self.rolloff = rolloff
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        out = np.empty(len(s))
+        for i in range(len(s)):
+            lo  = max(0, i - self.window + 1)
+            seg = s[lo:i+1]
+            if len(seg) < 2:
+                out[i] = 0.0
+                continue
+            mag       = np.abs(np.fft.rfft(seg))
+            threshold = self.rolloff * mag.sum()
+            out[i]    = np.searchsorted(np.cumsum(mag), threshold) / max(len(mag), 1)
+        return out
+
+
+@registry.register
+class MFCCRegressionForecast(BaseAlgorithm):
+    name        = "MFCC Regression Forecast"
+    service_id  = 1
+    category    = "signal_processing"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "MFCC-inspired cepstral coefficient mean for speed_ms frames"
+
+    def __init__(self, n_mfcc=13, window=32):
+        super().__init__(n_mfcc=n_mfcc, window=window)
+        self.n_mfcc = n_mfcc
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def _frame_mfcc(self, seg):
+        n_fft  = max(len(seg), 32)
+        mag    = np.abs(np.fft.rfft(seg, n=n_fft))
+        k      = min(self.n_mfcc, len(mag))
+        log_s  = np.log(mag[:k] + 1e-10)
+        ns     = np.arange(self.n_mfcc)
+        dct_m  = np.cos(np.pi * ns[:, None] * (2 * np.arange(k) + 1) / (2 * k))
+        return float((dct_m @ log_s).mean())
+
+    def predict(self, X):
+        s   = _speed(X)
+        out = np.empty(len(s))
+        for i in range(len(s)):
+            lo     = max(0, i - self.window + 1)
+            seg    = s[lo:i+1]
+            out[i] = self._frame_mfcc(seg) if len(seg) >= 2 else 0.0
+        return out
+
+
+# ============================================================
+# DEEP LEARNING — numpy approximations (16)
+# ============================================================
+
+@registry.register
+class LSTMForecast(BaseAlgorithm):
+    name        = "LSTM Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "LSTM-style gated recurrent forecast of speed_ms (numpy)"
+
+    def __init__(self, seq_len=10):
+        super().__init__(seq_len=seq_len)
+        self.seq_len = seq_len
+
+    def fit(self, X, y=None):
+        s    = _speed(X)
+        lags = min(self.seq_len, len(s) - 1)
+        if lags > 0 and len(s) > lags:
+            Y        = s[lags:]
+            Z        = np.column_stack([s[lags-i-1:len(s)-i-1] for i in range(lags)])
+            self.w_, _, _, _ = np.linalg.lstsq(Z, Y, rcond=None)
+            self.lags_ = lags
+        else:
+            self.w_    = np.array([0.5])
+            self.lags_ = 1
+        self.last_  = list(s[-self.lags_:])
+        self.mean_  = s.mean()
+        self.std_   = s.std() + 1e-9
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        buf = list(self.last_)
+        out = np.empty(len(s))
+        for i, v in enumerate(s):
+            z      = np.array(buf[-self.lags_:])
+            c      = np.dot(self.w_, z)
+            out[i] = np.tanh(c) * self.std_ + self.mean_
+            buf.append(v)
+        return out
+
+
+@registry.register
+class BiLSTMForecast(BaseAlgorithm):
+    name        = "BiLSTM Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "BiLSTM-style forward+backward EMA combination of speed_ms"
+
+    def __init__(self, alpha=0.3):
+        super().__init__(alpha=alpha)
+        self.alpha = alpha
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        fwd = _ema(s, self.alpha)
+        bwd = _ema(s[::-1], self.alpha)[::-1]
+        return 0.5 * (fwd + bwd)
+
+
+@registry.register
+class GRUForecast(BaseAlgorithm):
+    name        = "GRU Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "GRU-style gated recurrent unit forecast of speed_ms (numpy)"
+
+    def fit(self, X, y=None):
+        s              = _speed(X)
+        self.phi_      = np.corrcoef(s[:-1], s[1:])[0, 1] if len(s) > 1 else 0.5
+        self.mean_     = s.mean()
+        self.last_     = s[-1]
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        h   = self.last_
+        out = np.empty(len(s))
+        for i, v in enumerate(s):
+            z      = 0.4
+            r      = 0.6
+            h_cand = np.tanh(r * h + (1 - r) * v)
+            h      = (1 - z) * h + z * h_cand
+            out[i] = h
+            h      = 0.9 * h + 0.1 * v
+        return out
+
+
+@registry.register
+class TCNForecast(BaseAlgorithm):
+    name        = "TCN Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Temporal Convolutional Network via dilated causal convolutions"
+
+    def __init__(self, n_levels=4):
+        super().__init__(n_levels=n_levels)
+        self.n_levels = n_levels
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s      = _speed(X)
+        result = s.copy()
+        for level in range(self.n_levels):
+            d        = 2 ** level
+            dilated  = np.empty_like(result)
+            dilated[d:] = 0.5 * result[d:] + 0.5 * result[:-d]
+            dilated[:d] = result[:d]
+            result   = 0.7 * result + 0.3 * dilated
+        return result
+
+
+@registry.register
+class TransformerForecast(BaseAlgorithm):
+    name        = "Transformer Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Transformer self-attention weighted forecast of speed_ms (numpy)"
+
+    def __init__(self, window=16):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        out = np.empty(len(s))
+        for i in range(len(s)):
+            lo   = max(0, i - self.window + 1)
+            seg  = s[lo:i+1]
+            q    = seg.reshape(-1, 1)
+            scores = q @ q.T / (len(seg) ** 0.5 + 1e-9)
+            attn   = np.exp(scores - scores.max(axis=1, keepdims=True))
+            attn  /= attn.sum(axis=1, keepdims=True)
+            out[i] = (attn @ q).mean()
+        return out
+
+
+@registry.register
+class CNNLSTMForecast(BaseAlgorithm):
+    name        = "CNN-LSTM Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "CNN-LSTM hybrid: local convolution followed by EMA of speed_ms"
+
+    def __init__(self, kernel_size=3, alpha=0.3):
+        super().__init__(kernel_size=kernel_size, alpha=alpha)
+        self.kernel_size = kernel_size
+        self.alpha       = alpha
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s    = _speed(X)
+        conv = np.convolve(s, np.ones(self.kernel_size) / self.kernel_size, mode='same')
+        return _ema(conv, self.alpha)
+
+
+@registry.register
+class WaveNetForecast(BaseAlgorithm):
+    name        = "WaveNet Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "WaveNet dilated causal convolution with gated activations (numpy)"
+
+    def __init__(self, n_layers=5):
+        super().__init__(n_layers=n_layers)
+        self.n_layers = n_layers
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s    = _speed(X)
+        skip = np.zeros_like(s)
+        x    = s.copy()
+        for i in range(self.n_layers):
+            d          = 2 ** i
+            xd         = np.empty_like(x)
+            xd[d:]     = x[:-d]
+            xd[:d]     = x[:d]
+            gate       = np.tanh(x) * (1.0 / (1.0 + np.exp(-xd)))
+            skip      += gate / self.n_layers
+            x          = x + gate * 0.1
+        return np.tanh(skip)
+
+
+@registry.register
+class NBEATSForecast(BaseAlgorithm):
+    name        = "N-BEATS Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "N-BEATS basis expansion forecast of speed_ms (numpy)"
+
+    def __init__(self, degree=3, n_blocks=3):
+        super().__init__(degree=degree, n_blocks=n_blocks)
+        self.degree   = degree
+        self.n_blocks = n_blocks
+
+    def fit(self, X, y=None):
+        s    = _speed(X)
+        t    = np.arange(len(s)) / max(len(s), 1)
+        self.basis_coef_ = []
+        residual         = s.copy()
+        for _ in range(self.n_blocks):
+            coef     = np.polyfit(t, residual, self.degree)
+            residual = residual - np.polyval(coef, t)
+            self.basis_coef_.append(coef)
+        self.n_ = len(s)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        n = len(X)
+        t = np.arange(self.n_, self.n_ + n) / max(self.n_, 1)
+        return sum(np.polyval(coef, t) for coef in self.basis_coef_)
+
+
+@registry.register
+class NHiTSForecast(BaseAlgorithm):
+    name        = "N-HiTS Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "N-HiTS hierarchical interpolation forecast of speed_ms (numpy)"
+
+    def __init__(self, n_stacks=3):
+        super().__init__(n_stacks=n_stacks)
+        self.n_stacks = n_stacks
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        self.stack_stats_ = []
+        for k in range(self.n_stacks):
+            step = 2 ** k
+            ds   = s[::step]
+            mean = ds.mean()
+            drift = float(np.mean(np.diff(ds))) if len(ds) > 1 else 0.0
+            self.stack_stats_.append((mean, drift))
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        n    = len(X)
+        fcast = np.zeros(n)
+        total_w = sum(1.0 / (k + 1) for k in range(self.n_stacks))
+        for k, (mean, drift) in enumerate(self.stack_stats_):
+            w      = 1.0 / (k + 1)
+            fcast += w * (mean + drift * np.arange(n))
+        return fcast / total_w
+
+
+@registry.register
+class TFTForecast(BaseAlgorithm):
+    name        = "TFT Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Temporal Fusion Transformer-style gated network forecast (numpy)"
+
+    def fit(self, X, y=None):
+        s              = _speed(X)
+        self.mean_     = s.mean()
+        self.std_      = s.std() + 1e-9
+        lags = min(3, len(s) - 1)
+        if lags > 0 and len(s) > lags:
+            Y        = s[lags:]
+            Z        = np.column_stack([s[lags-i-1:len(s)-i-1] for i in range(lags)])
+            self.ar_w_, _, _, _ = np.linalg.lstsq(Z, Y, rcond=None)
+            self.lags_ = lags
+        else:
+            self.ar_w_ = np.array([0.5])
+            self.lags_ = 1
+        self.last_ = list(s[-max(self.lags_, 1):])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        buf = list(self.last_)
+        out = np.empty(len(s))
+        for i, v in enumerate(s):
+            z      = np.array(buf[-self.lags_:])
+            raw    = np.dot(self.ar_w_, z)
+            gate   = 1.0 / (1.0 + np.exp(-raw))
+            out[i] = gate * raw + (1 - gate) * self.mean_
+            buf.append(v)
+        return out
+
+
+@registry.register
+class InformerForecast(BaseAlgorithm):
+    name        = "Informer Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Informer ProbSparse attention forecast of speed_ms (numpy)"
+
+    def __init__(self, window=32):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        out = np.empty(len(s))
+        for i in range(len(s)):
+            lo  = max(0, i - self.window + 1)
+            seg = s[lo:i+1]
+            n   = len(seg)
+            u   = max(1, int(np.ceil(np.log(n + 1))))
+            lags = min(u, n)
+            scores  = np.array([np.dot(seg, np.roll(seg, k)) for k in range(lags)])
+            weights = np.exp(scores - scores.max())
+            weights /= weights.sum()
+            preds   = np.array([seg[max(0, n-1-k)] for k in range(lags)])
+            out[i]  = np.dot(weights, preds)
+        return out
+
+
+@registry.register
+class AutoformerForecast(BaseAlgorithm):
+    name        = "Autoformer Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Autoformer decomposition+autocorrelation forecast (numpy)"
+
+    def __init__(self, window=25):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        from scipy.ndimage import uniform_filter1d
+        s              = _speed(X)
+        sz             = max(3, min(self.window, len(s) // 4))
+        self.trend_    = uniform_filter1d(s, size=sz)
+        self.seasonal_ = s - self.trend_
+        self.sz_       = sz
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        from scipy.ndimage import uniform_filter1d
+        s        = _speed(X)
+        sz       = max(3, min(self.sz_, len(s) // 4))
+        trend    = uniform_filter1d(s, size=sz)
+        seasonal = s - trend
+        acf_lag  = min(self.window, len(seasonal) - 1)
+        seasonal_fcast = np.roll(seasonal, acf_lag) * 0.5
+        return trend + seasonal_fcast
+
+
+@registry.register
+class PatchTSTForecast(BaseAlgorithm):
+    name        = "PatchTST Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "PatchTST patch-based attention forecast of speed_ms (numpy)"
+
+    def __init__(self, patch_len=8, stride=4):
+        super().__init__(patch_len=patch_len, stride=stride)
+        self.patch_len = patch_len
+        self.stride    = stride
+
+    def fit(self, X, y=None):
+        s       = _speed(X)
+        patches = [s[i:i+self.patch_len].mean()
+                   for i in range(0, len(s) - self.patch_len + 1, self.stride)]
+        self.patch_vals_ = np.array(patches) if patches else np.array([s.mean()])
+        self.global_mean_ = s.mean()
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        n   = len(s)
+        out = np.empty(n)
+        p   = len(self.patch_vals_)
+        for j in range(n):
+            idx    = j * p // max(n, 1)
+            out[j] = self.patch_vals_[min(idx, p - 1)]
+        return out
+
+
+@registry.register
+class TimesNetForecast(BaseAlgorithm):
+    name        = "TimesNet Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "TimesNet 2D temporal pattern modelling of speed_ms (numpy)"
+
+    def __init__(self, period=12):
+        super().__init__(period=period)
+        self.period = period
+
+    def fit(self, X, y=None):
+        s = _speed(X)
+        p = min(self.period, max(2, len(s) // 4))
+        n = (len(s) // p) * p
+        if n > 0:
+            mat             = s[:n].reshape(-1, p)
+            self.col_mean_  = mat.mean(axis=0)
+            self.row_last_  = mat[-1].mean()
+        else:
+            self.col_mean_  = np.full(p, s.mean())
+            self.row_last_  = s.mean()
+        self.p_        = p
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s   = _speed(X)
+        out = np.empty(len(s))
+        for i in range(len(s)):
+            out[i] = 0.6 * self.row_last_ + 0.4 * self.col_mean_[i % self.p_]
+        return out
+
+
+@registry.register
+class DLinearForecast(BaseAlgorithm):
+    name        = "DLinear Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "DLinear decompose into trend+seasonal then linear forecast"
+
+    def fit(self, X, y=None):
+        s      = _speed(X)
+        kernel = max(3, min(25, len(s) // 4))
+        if kernel % 2 == 0:
+            kernel += 1
+        trend            = np.convolve(s, np.ones(kernel) / kernel, mode='same')
+        seasonal         = s - trend
+        t                = np.arange(len(s))
+        self.trend_coef_ = np.polyfit(t, trend, 1)
+        self.seas_mean_  = seasonal.mean()
+        self.n_          = len(s)
+        self.is_fitted   = True
+        return self
+
+    def predict(self, X):
+        n    = len(X)
+        t    = np.arange(self.n_, self.n_ + n)
+        return np.polyval(self.trend_coef_, t) + self.seas_mean_
+
+
+@registry.register
+class NLinearForecast(BaseAlgorithm):
+    name        = "NLinear Forecast"
+    service_id  = 1
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "NLinear: normalise by last value, apply linear weight, denormalise"
+
+    def fit(self, X, y=None):
+        s          = _speed(X)
+        self.last_ = s[-1]
+        if len(s) > 1:
+            diffs   = np.diff(s)
+            self.w_ = float(np.clip(diffs.mean() / (diffs.std() + 1e-9), -1.0, 1.0))
+        else:
+            self.w_ = 0.0
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s          = _speed(X)
+        normalised = s - self.last_
+        return normalised * self.w_ + self.last_

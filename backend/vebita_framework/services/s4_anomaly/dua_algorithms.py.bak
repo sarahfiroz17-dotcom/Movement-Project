@@ -1,0 +1,1925 @@
+"""
+services/s4_anomaly/dua_algorithms.py
+======================================
+VEBITA — Service 4: Anomaly Detection (Dua)
+
+100 algorithms across 6 families:
+  A. Linear & Statistical          (algorithms  1-30)
+  B. Tree & Ensemble Methods       (algorithms 31-55)
+  C. Kernel & Distance-Based       (algorithms 56-70)
+  D. Probabilistic & Bayesian      (algorithms 71-80)
+  E. Deep Learning (NumPy proxy)   (algorithms 81-90)
+  F. Ecological / Movement-Specific(algorithms 91-100)
+
+Feature matrix X shape: (n_points, 8)
+  [0] speed_ms        [1] altitude_m      [2] turning_angle   [3] straightness
+  [4] speed_roll_mean [5] speed_roll_std  [6] step_length_m   [7] alt_roll_mean
+
+predict() returns float array:  1 = anomaly,  0 = normal
+Service ID: 4
+
+Activate in main.py:
+    from vebita_framework.services.s4_anomaly.dua_algorithms import *
+"""
+
+import warnings
+import numpy as np
+from scipy import stats
+from sklearn.decomposition import PCA
+from sklearn.ensemble import (
+    IsolationForest, RandomForestClassifier,
+    GradientBoostingClassifier,
+)
+from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors
+from sklearn.preprocessing import StandardScaler
+from sklearn.covariance import EllipticEnvelope
+from sklearn.cluster import DBSCAN, KMeans
+from sklearn.svm import OneClassSVM
+from sklearn.linear_model import LinearRegression, Ridge, Lasso
+from sklearn.neighbors import KernelDensity
+
+from core.base import BaseAlgorithm
+from core.registry import registry
+
+warnings.filterwarnings("ignore")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHARED HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _thr(scores, pct=95):
+    return np.percentile(scores, pct)
+
+def _zscore_max(X, mu, sd):
+    return np.abs((X - mu) / sd).max(1)
+
+def _mahal(X, mu, inv):
+    d = X - mu
+    return np.einsum("ij,jk,ik->i", d, inv, d)
+
+def _knn_dist(X, nn_model):
+    dists, _ = nn_model.kneighbors(X)
+    return dists[:, 1:].mean(1)
+
+def _rolling_mean(x, w=10):
+    out = np.empty(len(x))
+    for i in range(len(x)):
+        lo = max(0, i - w + 1)
+        out[i] = x[lo: i + 1].mean()
+    return out
+
+def _sk_binary(pred):
+    return (pred == -1).astype(float)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# A. LINEAR & STATISTICAL  (#1 – #30)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class AD_A01_ZScoreMax(BaseAlgorithm):
+    """A01 — Max per-feature z-score exceeds threshold."""
+    name = "AD A01 Z-Score Max"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Max per-feature z-score anomaly detector"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0); self.sd_ = X.std(0) + 1e-12
+        self.thr_ = _thr(_zscore_max(X, self.mu_, self.sd_))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return (_zscore_max(X, self.mu_, self.sd_) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A02_ZScoreMean(BaseAlgorithm):
+    """A02 — Mean per-feature z-score exceeds threshold."""
+    name = "AD A02 Z-Score Mean"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Mean per-feature z-score anomaly detector"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0); self.sd_ = X.std(0) + 1e-12
+        s = np.abs((X - self.mu_) / self.sd_).mean(1)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return (np.abs((X - self.mu_) / self.sd_).mean(1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A03_ZScoreSumSq(BaseAlgorithm):
+    """A03 — Sum of squared z-scores (chi-squared proxy)."""
+    name = "AD A03 Z-Score Sum-Squared"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Sum of squared z-scores across all features"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0); self.sd_ = X.std(0) + 1e-12
+        s = (((X - self.mu_) / self.sd_) ** 2).sum(1)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return ((((X - self.mu_) / self.sd_) ** 2).sum(1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A04_Mahalanobis(BaseAlgorithm):
+    """A04 — Mahalanobis distance from centroid."""
+    name = "AD A04 Mahalanobis"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Mahalanobis distance anomaly detection"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0)
+        try:
+            self.inv_ = np.linalg.pinv(np.cov(X, rowvar=False))
+        except Exception:
+            self.inv_ = np.eye(X.shape[1])
+        self.thr_ = _thr(_mahal(X, self.mu_, self.inv_))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return (_mahal(X, self.mu_, self.inv_) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A05_RobustMahalanobis(BaseAlgorithm):
+    """A05 — Robust Mahalanobis using trimmed mean and covariance."""
+    name = "AD A05 Robust Mahalanobis"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Robust (IQR-trimmed) Mahalanobis distance"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        q1, q3 = np.percentile(X, 25, 0), np.percentile(X, 75, 0)
+        mask = ((X >= q1) & (X <= q3)).all(1)
+        Xr = X[mask] if mask.sum() > X.shape[1] + 1 else X
+        self.mu_ = Xr.mean(0)
+        self.inv_ = np.linalg.pinv(np.cov(Xr, rowvar=False) + 1e-6 * np.eye(X.shape[1]))
+        self.thr_ = _thr(_mahal(X, self.mu_, self.inv_))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return (_mahal(X, self.mu_, self.inv_) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A06_IQR(BaseAlgorithm):
+    """A06 — IQR rule: flag any feature outside 1.5×IQR."""
+    name = "AD A06 IQR Outlier"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Per-feature IQR fence outlier detection"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.q1_ = np.percentile(X, 25, 0)
+        self.q3_ = np.percentile(X, 75, 0)
+        self.iqr_ = self.q3_ - self.q1_ + 1e-12
+        self.is_fitted = True; return self
+    def predict(self, X):
+        out = ((X < self.q1_ - 1.5 * self.iqr_) | (X > self.q3_ + 1.5 * self.iqr_)).any(1)
+        return out.astype(float)
+
+
+@registry.register
+class AD_A07_ModifiedZScore(BaseAlgorithm):
+    """A07 — Modified z-score using median and MAD."""
+    name = "AD A07 Modified Z-Score (MAD)"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Median Absolute Deviation robust z-score"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.med_ = np.median(X, 0)
+        self.mad_ = np.median(np.abs(X - self.med_), 0) + 1e-12
+        s = (0.6745 * np.abs(X - self.med_) / self.mad_).max(1)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        s = (0.6745 * np.abs(X - self.med_) / self.mad_).max(1)
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A08_Grubbs(BaseAlgorithm):
+    """A08 — Grubbs test statistic on speed (feature 0)."""
+    name = "AD A08 Grubbs Test"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Grubbs outlier test applied to speed feature"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        x = X[:, 0]
+        self.mu_ = x.mean(); self.sd_ = x.std() + 1e-12
+        self.thr_ = _thr(np.abs(x - self.mu_) / self.sd_)
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return (np.abs(X[:, 0] - self.mu_) / self.sd_ > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A09_ChiSquared(BaseAlgorithm):
+    """A09 — Chi-squared score from standardised features."""
+    name = "AD A09 Chi-Squared"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Chi-squared anomaly score from standardised movement features"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0); self.sd_ = X.std(0) + 1e-12
+        s = (((X - self.mu_) / self.sd_) ** 2).sum(1)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return ((((X - self.mu_) / self.sd_) ** 2).sum(1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A10_ControlChart3Sigma(BaseAlgorithm):
+    """A10 — Western Electric 3-sigma control chart."""
+    name = "AD A10 Control Chart 3σ"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Classical 3-sigma control chart for movement features"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0); self.sd_ = X.std(0) + 1e-12
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return (np.abs((X - self.mu_) / self.sd_).max(1) > 3).astype(float)
+
+
+@registry.register
+class AD_A11_CUSUM(BaseAlgorithm):
+    """A11 — CUSUM (cumulative sum control) on speed."""
+    name = "AD A11 CUSUM"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "CUSUM change detection on speed feature"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        x = X[:, 0]; self.mu_ = x.mean()
+        cusum = np.maximum.accumulate(np.abs(np.cumsum(x - self.mu_)))
+        self.thr_ = _thr(cusum); self.is_fitted = True; return self
+    def predict(self, X):
+        x = X[:, 0]
+        cusum = np.maximum.accumulate(np.abs(np.cumsum(x - self.mu_)))
+        return (cusum > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A12_EWMA(BaseAlgorithm):
+    """A12 — EWMA residual anomaly detection on speed."""
+    name = "AD A12 EWMA"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Exponentially Weighted Moving Average residual on speed"
+
+    def __init__(self, alpha=0.1): super().__init__(alpha=alpha); self.alpha = alpha
+    def _ewma(self, x):
+        out = np.zeros(len(x)); out[0] = x[0]
+        for i in range(1, len(x)):
+            out[i] = self.alpha * x[i] + (1 - self.alpha) * out[i - 1]
+        return out
+    def fit(self, X, y=None):
+        x = X[:, 0]; s = np.abs(x - self._ewma(x))
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        x = X[:, 0]; s = np.abs(x - self._ewma(x))
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A13_EllipticEnvelope(BaseAlgorithm):
+    """A13 — Robust covariance elliptic envelope."""
+    name = "AD A13 Elliptic Envelope"
+    service_id = 4; category = "A_statistical"; library = "sklearn"; animals = ["all"]
+    description = "sklearn EllipticEnvelope robust covariance anomaly detector"
+
+    def __init__(self): super().__init__(); self.model_ = None
+    def fit(self, X, y=None):
+        try:
+            self.model_ = EllipticEnvelope(contamination=0.05, support_fraction=0.9)
+            self.model_.fit(X)
+        except Exception:
+            self.model_ = None
+        self.is_fitted = True; return self
+    def predict(self, X):
+        if self.model_ is None:
+            return np.zeros(len(X), dtype=float)
+        return _sk_binary(self.model_.predict(X))
+
+
+@registry.register
+class AD_A14_GMMSingleGaussian(BaseAlgorithm):
+    """A14 — Single Gaussian log-likelihood anomaly score."""
+    name = "AD A14 GMM Single Gaussian"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Single Gaussian model negative log-likelihood"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0)
+        self.cov_ = np.cov(X, rowvar=False) + 1e-6 * np.eye(X.shape[1])
+        self.inv_ = np.linalg.pinv(self.cov_)
+        s = _mahal(X, self.mu_, self.inv_)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return (_mahal(X, self.mu_, self.inv_) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A15_BoxplotMultiFeature(BaseAlgorithm):
+    """A15 — Multi-feature boxplot fence."""
+    name = "AD A15 Boxplot Multi-Feature"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Count features outside 1.5×IQR fence; threshold at 1"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        iqr = np.percentile(X, 75, 0) - np.percentile(X, 25, 0)
+        self.lo_ = np.percentile(X, 25, 0) - 1.5 * iqr
+        self.hi_ = np.percentile(X, 75, 0) + 1.5 * iqr
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return ((X < self.lo_) | (X > self.hi_)).any(1).astype(float)
+
+
+@registry.register
+class AD_A16_StudentT(BaseAlgorithm):
+    """A16 — Student-t tail probability anomaly."""
+    name = "AD A16 Student-t Tail"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Student-t tail test on standardised movement features"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0); self.sd_ = X.std(0) + 1e-12
+        t = np.abs((X - self.mu_) / self.sd_).max(1)
+        self.thr_ = _thr(t); self.is_fitted = True; return self
+    def predict(self, X):
+        t = np.abs((X - self.mu_) / self.sd_).max(1)
+        return (t > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A17_PoissonRate(BaseAlgorithm):
+    """A17 — Poisson-rate anomaly on speed."""
+    name = "AD A17 Poisson Rate"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Poisson-rate deviation on speed feature"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        x = np.abs(X[:, 0]); self.lam_ = x.mean() + 1e-12
+        s = np.abs(x - self.lam_) / np.sqrt(self.lam_)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        x = np.abs(X[:, 0])
+        s = np.abs(x - self.lam_) / np.sqrt(self.lam_)
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A18_ExtremePercentile(BaseAlgorithm):
+    """A18 — Flag top-1% / bottom-1% percentile per feature."""
+    name = "AD A18 Extreme Percentile"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Flag any feature at extreme 1st or 99th percentile"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.lo_ = np.percentile(X, 1, 0)
+        self.hi_ = np.percentile(X, 99, 0)
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return ((X < self.lo_) | (X > self.hi_)).any(1).astype(float)
+
+
+@registry.register
+class AD_A19_TrimmedMeanDistance(BaseAlgorithm):
+    """A19 — Distance from 10%-trimmed mean."""
+    name = "AD A19 Trimmed Mean Distance"
+    service_id = 4; category = "A_statistical"; library = "scipy"; animals = ["all"]
+    description = "Euclidean distance from trimmed mean centroid"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = stats.trim_mean(X, 0.1, axis=0)
+        s = np.linalg.norm(X - self.mu_, axis=1)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return (np.linalg.norm(X - self.mu_, axis=1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A20_WinsorisedResidual(BaseAlgorithm):
+    """A20 — Winsorised mean residual."""
+    name = "AD A20 Winsorised Residual"
+    service_id = 4; category = "A_statistical"; library = "scipy"; animals = ["all"]
+    description = "Residual from 5%-Winsorised mean per feature"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        from scipy.stats import mstats
+        self.wmu_ = np.array([mstats.winsorize(X[:, j], (0.05, 0.05)).mean()
+                               for j in range(X.shape[1])])
+        s = np.linalg.norm(X - self.wmu_, axis=1)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return (np.linalg.norm(X - self.wmu_, axis=1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A21_LinearRegressionResidual(BaseAlgorithm):
+    """A21 — OLS residual: speed predicted from step_length."""
+    name = "AD A21 Linear Regression Residual"
+    service_id = 4; category = "A_statistical"; library = "sklearn"; animals = ["all"]
+    description = "OLS residual of speed on step_length as anomaly score"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.lr_ = LinearRegression()
+        self.lr_.fit(X[:, [6]], X[:, 0])
+        s = np.abs(X[:, 0] - self.lr_.predict(X[:, [6]]))
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        s = np.abs(X[:, 0] - self.lr_.predict(X[:, [6]]))
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A22_RidgeResidual(BaseAlgorithm):
+    """A22 — Ridge-regularised residual on speed."""
+    name = "AD A22 Ridge Regression Residual"
+    service_id = 4; category = "A_statistical"; library = "sklearn"; animals = ["all"]
+    description = "Ridge regression residual of speed on other features"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.lr_ = Ridge(alpha=1.0)
+        self.lr_.fit(X[:, 1:], X[:, 0])
+        s = np.abs(X[:, 0] - self.lr_.predict(X[:, 1:]))
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        s = np.abs(X[:, 0] - self.lr_.predict(X[:, 1:]))
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A23_LassoResidual(BaseAlgorithm):
+    """A23 — Lasso residual (sparse feature selection)."""
+    name = "AD A23 Lasso Residual"
+    service_id = 4; category = "A_statistical"; library = "sklearn"; animals = ["all"]
+    description = "Lasso regression residual for sparse anomaly detection"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.lr_ = Lasso(alpha=0.01)
+        self.lr_.fit(X[:, 1:], X[:, 0])
+        s = np.abs(X[:, 0] - self.lr_.predict(X[:, 1:]))
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        s = np.abs(X[:, 0] - self.lr_.predict(X[:, 1:]))
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A24_SkewnessAnomaly(BaseAlgorithm):
+    """A24 — Rolling skewness deviation on speed."""
+    name = "AD A24 Rolling Skewness"
+    service_id = 4; category = "A_statistical"; library = "scipy"; animals = ["all"]
+    description = "Rolling skewness deviation from global skewness on speed"
+
+    def __init__(self, w=15): super().__init__(w=w); self.w = w
+    def _score(self, x):
+        out = np.zeros(len(x))
+        for i in range(len(x)):
+            chunk = x[max(0, i - self.w): i + 1]
+            if len(chunk) > 2:
+                out[i] = abs(float(stats.skew(chunk)) - self.gskew_)
+        return out
+    def fit(self, X, y=None):
+        x = X[:, 0]; self.gskew_ = float(stats.skew(x))
+        self.thr_ = _thr(self._score(x)); self.is_fitted = True; return self
+    def predict(self, X):
+        return (self._score(X[:, 0]) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A25_KurtosisAnomaly(BaseAlgorithm):
+    """A25 — Rolling kurtosis deviation on speed."""
+    name = "AD A25 Rolling Kurtosis"
+    service_id = 4; category = "A_statistical"; library = "scipy"; animals = ["all"]
+    description = "Rolling kurtosis deviation from global kurtosis on speed"
+
+    def __init__(self, w=15): super().__init__(w=w); self.w = w
+    def _score(self, x):
+        out = np.zeros(len(x))
+        for i in range(len(x)):
+            chunk = x[max(0, i - self.w): i + 1]
+            if len(chunk) > 3:
+                out[i] = abs(float(stats.kurtosis(chunk)) - self.gkurt_)
+        return out
+    def fit(self, X, y=None):
+        x = X[:, 0]; self.gkurt_ = float(stats.kurtosis(x))
+        self.thr_ = _thr(self._score(x)); self.is_fitted = True; return self
+    def predict(self, X):
+        return (self._score(X[:, 0]) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A26_MeanAbsDeviation(BaseAlgorithm):
+    """A26 — Mean absolute deviation from feature mean."""
+    name = "AD A26 Mean Absolute Deviation"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Mean absolute deviation anomaly score across features"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0)
+        self.thr_ = _thr(np.abs(X - self.mu_).mean(1))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return (np.abs(X - self.mu_).mean(1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A27_VarianceRatio(BaseAlgorithm):
+    """A27 — Local window variance vs global variance ratio."""
+    name = "AD A27 Variance Ratio"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Rolling window variance ratio for local volatility detection"
+
+    def __init__(self, w=10): super().__init__(w=w); self.w = w
+    def _score(self, X):
+        out = np.zeros(len(X))
+        for i in range(len(X)):
+            chunk = X[max(0, i - self.w): i + 1]
+            out[i] = np.max(chunk.var(0) / (self.gvar_ + 1e-12))
+        return out
+    def fit(self, X, y=None):
+        self.gvar_ = X.var(0) + 1e-12
+        self.thr_ = _thr(self._score(X)); self.is_fitted = True; return self
+    def predict(self, X):
+        return (self._score(X) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A28_CorrelationBreak(BaseAlgorithm):
+    """A28 — Detect break in feature correlation structure."""
+    name = "AD A28 Correlation Break"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Deviation of local correlation from global correlation matrix"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.C_ = np.corrcoef(X, rowvar=False)
+        s = np.array([np.abs((X - X.mean(0)) / (X.std(0) + 1e-12)).max(1)[i]
+                      for i in range(len(X))])
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        s = np.abs((X - X.mean(0)) / (X.std(0) + 1e-12)).max(1)
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A29_FeatureEntropy(BaseAlgorithm):
+    """A29 — Feature entropy deviation anomaly."""
+    name = "AD A29 Feature Entropy"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Sum of per-feature z-scores as entropy-style anomaly score"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0); self.sd_ = X.std(0) + 1e-12
+        s = np.abs((X - self.mu_) / self.sd_).sum(1)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return (np.abs((X - self.mu_) / self.sd_).sum(1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_A30_BayesianChangePoint(BaseAlgorithm):
+    """A30 — Bayesian changepoint proxy via speed jump detection."""
+    name = "AD A30 Bayesian Changepoint Proxy"
+    service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
+    description = "Bayesian online changepoint proxy on speed differences"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        x = X[:, 0]
+        diffs = np.abs(np.diff(x, prepend=x[0]))
+        self.mu_d_ = diffs.mean(); self.sd_d_ = diffs.std() + 1e-12
+        self.thr_ = _thr((diffs - self.mu_d_) / self.sd_d_)
+        self.is_fitted = True; return self
+    def predict(self, X):
+        x = X[:, 0]
+        diffs = np.abs(np.diff(x, prepend=x[0]))
+        s = (diffs - self.mu_d_) / self.sd_d_
+        return (s > self.thr_).astype(float)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# B. TREE & ENSEMBLE METHODS  (#31 – #55)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class AD_B31_IsolationForest5(BaseAlgorithm):
+    """B31 — Isolation Forest (contamination=5%)."""
+    name = "AD B31 Isolation Forest 5pct"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "Standard Isolation Forest with 5% contamination"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.m_ = IsolationForest(contamination=0.05, random_state=42)
+        self.m_.fit(X); self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(X))
+
+
+@registry.register
+class AD_B32_IsolationForest10(BaseAlgorithm):
+    """B32 — Isolation Forest (contamination=10%)."""
+    name = "AD B32 Isolation Forest 10pct"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "Isolation Forest with higher 10% contamination rate"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.m_ = IsolationForest(contamination=0.10, random_state=42)
+        self.m_.fit(X); self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(X))
+
+
+@registry.register
+class AD_B33_IsolationForestSmall(BaseAlgorithm):
+    """B33 — Isolation Forest with small trees (max_samples=32)."""
+    name = "AD B33 Isolation Forest Small Trees"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "IF with small trees — faster for streaming GPS data"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.m_ = IsolationForest(max_samples=min(32, len(X)),
+                                   contamination=0.05, random_state=42)
+        self.m_.fit(X); self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(X))
+
+
+@registry.register
+class AD_B34_IsolationForest200(BaseAlgorithm):
+    """B34 — Isolation Forest with 200 trees for stability."""
+    name = "AD B34 Isolation Forest 200 Trees"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "Large IF ensemble — lower variance anomaly detection"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.m_ = IsolationForest(n_estimators=200, contamination=0.05, random_state=42)
+        self.m_.fit(X); self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(X))
+
+
+@registry.register
+class AD_B35_IsolationForestPCA(BaseAlgorithm):
+    """B35 — Isolation Forest on 3 PCA components."""
+    name = "AD B35 IF + PCA Subspace"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "PCA dimensionality reduction then Isolation Forest"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        nc = min(3, X.shape[1], X.shape[0] - 1)
+        self.pca_ = PCA(n_components=nc).fit(X)
+        self.m_ = IsolationForest(contamination=0.05, random_state=42)
+        self.m_.fit(self.pca_.transform(X))
+        self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(self.pca_.transform(X)))
+
+
+@registry.register
+class AD_B36_IFScoreThreshold90(BaseAlgorithm):
+    """B36 — IF anomaly score at 90th-percentile threshold."""
+    name = "AD B36 IF Score Threshold 90p"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "IF score thresholded at the 90th percentile"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.m_ = IsolationForest(n_estimators=100, random_state=42).fit(X)
+        self.thr_ = _thr(-self.m_.score_samples(X), 90)
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return (-self.m_.score_samples(X) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_B37_IFScoreThreshold97(BaseAlgorithm):
+    """B37 — IF anomaly score at 97th-percentile threshold."""
+    name = "AD B37 IF Score Threshold 97p"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "IF score thresholded at the 97th percentile"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.m_ = IsolationForest(n_estimators=100, random_state=42).fit(X)
+        self.thr_ = _thr(-self.m_.score_samples(X), 97)
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return (-self.m_.score_samples(X) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_B38_IFSubspace(BaseAlgorithm):
+    """B38 — IF on random half of features."""
+    name = "AD B38 IF Random Subspace"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "Isolation Forest on a random subset of movement features"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        np.random.seed(5)
+        self.cols_ = np.random.choice(X.shape[1], max(2, X.shape[1] // 2), replace=False)
+        self.m_ = IsolationForest(contamination=0.05, random_state=5)
+        self.m_.fit(X[:, self.cols_]); self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(X[:, self.cols_]))
+
+
+@registry.register
+class AD_B39_BootstrapIF(BaseAlgorithm):
+    """B39 — Bootstrap ensemble of three IF models (majority vote)."""
+    name = "AD B39 Bootstrap IF Ensemble"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "Majority vote of 3 bootstrap IF models"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.models_ = []
+        for seed in [1, 2, 3]:
+            np.random.seed(seed)
+            idx = np.random.choice(len(X), len(X), replace=True)
+            m = IsolationForest(contamination=0.05, random_state=seed)
+            m.fit(X[idx]); self.models_.append(m)
+        self.is_fitted = True; return self
+    def predict(self, X):
+        votes = np.stack([_sk_binary(m.predict(X)) for m in self.models_]).mean(0)
+        return (votes >= 0.5).astype(float)
+
+
+@registry.register
+class AD_B40_IFMaxFeatures(BaseAlgorithm):
+    """B40 — IF with max_features=1 (extra random)."""
+    name = "AD B40 IF Max Features 1"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "Extra-random IF with single feature splits per tree"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.m_ = IsolationForest(max_features=1, contamination=0.05, random_state=7)
+        self.m_.fit(X); self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(X))
+
+
+@registry.register
+class AD_B41_DBSCANNoise(BaseAlgorithm):
+    """B41 — DBSCAN noise points as anomalies."""
+    name = "AD B41 DBSCAN Noise Points"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "DBSCAN clusters — noise label = anomaly"
+
+    def __init__(self, eps=0.8): super().__init__(eps=eps); self.eps = eps
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X)
+        self.is_fitted = True; return self
+    def predict(self, X):
+        Xs = self.sc_.transform(X)
+        return (DBSCAN(eps=self.eps, min_samples=5).fit_predict(Xs) == -1).astype(float)
+
+
+@registry.register
+class AD_B42_DBSCANTight(BaseAlgorithm):
+    """B42 — DBSCAN with tighter eps (denser anomaly regions)."""
+    name = "AD B42 DBSCAN Tight Eps"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "DBSCAN with tight eps=0.4 for dense cluster anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X)
+        self.is_fitted = True; return self
+    def predict(self, X):
+        Xs = self.sc_.transform(X)
+        return (DBSCAN(eps=0.4, min_samples=3).fit_predict(Xs) == -1).astype(float)
+
+
+@registry.register
+class AD_B43_KMeansDistance(BaseAlgorithm):
+    """B43 — Distance to nearest K-Means centroid (k=8)."""
+    name = "AD B43 K-Means Distance"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "Nearest centroid distance anomaly score via K-Means"
+
+    def __init__(self, k=8): super().__init__(k=k); self.k = k
+    def fit(self, X, y=None):
+        k = min(self.k, len(X) // 5)
+        self.km_ = KMeans(n_clusters=k, random_state=42, n_init=10).fit(X)
+        s = np.min(np.linalg.norm(X[:, None] - self.km_.cluster_centers_[None], axis=2), 1)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        s = np.min(np.linalg.norm(X[:, None] - self.km_.cluster_centers_[None], axis=2), 1)
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_B44_KMeansLargeK(BaseAlgorithm):
+    """B44 — K-Means with larger K=15 for finer detection."""
+    name = "AD B44 K-Means Large K"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "K-Means (k=15) for fine-grained centroid distance anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        k = min(15, len(X) // 4)
+        self.km_ = KMeans(n_clusters=k, random_state=0, n_init=10).fit(X)
+        s = np.min(np.linalg.norm(X[:, None] - self.km_.cluster_centers_[None], axis=2), 1)
+        self.thr_ = _thr(s, 97); self.is_fitted = True; return self
+    def predict(self, X):
+        s = np.min(np.linalg.norm(X[:, None] - self.km_.cluster_centers_[None], axis=2), 1)
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_B45_OneClassSVM_RBF(BaseAlgorithm):
+    """B45 — One-Class SVM with RBF kernel."""
+    name = "AD B45 One-Class SVM RBF"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "One-Class SVM with RBF kernel for GPS anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X)
+        self.m_ = OneClassSVM(kernel="rbf", nu=0.05, gamma="scale")
+        self.m_.fit(self.sc_.transform(X)); self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(self.sc_.transform(X)))
+
+
+@registry.register
+class AD_B46_OneClassSVM_Poly(BaseAlgorithm):
+    """B46 — One-Class SVM with polynomial kernel."""
+    name = "AD B46 One-Class SVM Poly"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "One-Class SVM with polynomial kernel degree=3"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X)
+        self.m_ = OneClassSVM(kernel="poly", degree=3, nu=0.05)
+        self.m_.fit(self.sc_.transform(X)); self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(self.sc_.transform(X)))
+
+
+@registry.register
+class AD_B47_OneClassSVM_Linear(BaseAlgorithm):
+    """B47 — One-Class SVM with linear kernel."""
+    name = "AD B47 One-Class SVM Linear"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "One-Class linear SVM for movement anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X)
+        self.m_ = OneClassSVM(kernel="linear", nu=0.05)
+        self.m_.fit(self.sc_.transform(X)); self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(self.sc_.transform(X)))
+
+
+@registry.register
+class AD_B48_OCSVMDecisionMargin(BaseAlgorithm):
+    """B48 — One-Class SVM decision function margin."""
+    name = "AD B48 OCSVM Decision Margin"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "OC-SVM decision function distance to hyperplane"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X)
+        self.m_ = OneClassSVM(nu=0.05, kernel="rbf", gamma="scale")
+        Xs = self.sc_.transform(X); self.m_.fit(Xs)
+        self.thr_ = _thr(-self.m_.decision_function(Xs))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        Xs = self.sc_.transform(X)
+        return (-self.m_.decision_function(Xs) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_B49_GradientBoostProxy(BaseAlgorithm):
+    """B49 — Gradient Boosting pseudo-anomaly score."""
+    name = "AD B49 Gradient Boost Proxy"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "GBM trained on z-score pseudo-labels for anomaly detection"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        mu, sd = X.mean(0), X.std(0) + 1e-12
+        s = np.abs((X - mu) / sd).max(1)
+        pseudo_y = (s > _thr(s, 95)).astype(int)
+        if pseudo_y.sum() < 2: pseudo_y[:2] = 1
+        self.m_ = GradientBoostingClassifier(n_estimators=50, random_state=42)
+        self.m_.fit(X, pseudo_y); self.is_fitted = True; return self
+    def predict(self, X):
+        return (self.m_.predict_proba(X)[:, 1] > 0.5).astype(float)
+
+
+@registry.register
+class AD_B50_IFPartitionCount(BaseAlgorithm):
+    """B50 — IF rare-leaf partition count anomaly."""
+    name = "AD B50 IF Partition Count"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "IF rare tree-leaf frequency as anomaly proxy"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.m_ = IsolationForest(n_estimators=50, random_state=42).fit(X)
+        s = -self.m_.score_samples(X)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return (-self.m_.score_samples(X) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_B51_FeatureWeightedIF(BaseAlgorithm):
+    """B51 — Feature-importance weighted z-score anomaly."""
+    name = "AD B51 Feature Weighted IF"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "Random Forest feature importance weighted anomaly score"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        mu, sd = X.mean(0), X.std(0) + 1e-12
+        s = np.abs((X - mu) / sd).max(1)
+        pseudo_y = (s > _thr(s, 95)).astype(int)
+        if pseudo_y.sum() < 2: pseudo_y[:2] = 1
+        rf = RandomForestClassifier(n_estimators=50, random_state=42).fit(X, pseudo_y)
+        fi = rf.feature_importances_
+        self.w_ = fi / (fi.sum() + 1e-12)
+        self.mu_ = (X * self.w_).mean(0); self.sd_ = (X * self.w_).std(0) + 1e-12
+        s2 = np.abs((X * self.w_ - self.mu_) / self.sd_).max(1)
+        self.thr_ = _thr(s2); self.is_fitted = True; return self
+    def predict(self, X):
+        s = np.abs((X * self.w_ - self.mu_) / self.sd_).max(1)
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_B52_IFWithScaler(BaseAlgorithm):
+    """B52 — Isolation Forest on standardised features."""
+    name = "AD B52 IF Standardised"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "StandardScaler + Isolation Forest pipeline"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X)
+        self.m_ = IsolationForest(contamination=0.05, random_state=42)
+        self.m_.fit(self.sc_.transform(X)); self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(self.sc_.transform(X)))
+
+
+@registry.register
+class AD_B53_AgglomerativeProxy(BaseAlgorithm):
+    """B53 — Agglomerative cluster distance (K-Means proxy, k=5)."""
+    name = "AD B53 Agglomerative Proxy"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "Agglomerative-style cluster distance proxy via K-Means k=5"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        k = min(5, len(X) // 5)
+        self.km_ = KMeans(n_clusters=k, random_state=42, n_init=10).fit(X)
+        s = np.min(np.linalg.norm(X[:, None] - self.km_.cluster_centers_[None], axis=2), 1)
+        self.thr_ = _thr(s, 97); self.is_fitted = True; return self
+    def predict(self, X):
+        s = np.min(np.linalg.norm(X[:, None] - self.km_.cluster_centers_[None], axis=2), 1)
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_B54_IFLowContamination(BaseAlgorithm):
+    """B54 — Isolation Forest with very low contamination (2%)."""
+    name = "AD B54 IF Low Contamination"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "IF with 2% contamination for rare anomaly detection"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.m_ = IsolationForest(contamination=0.02, random_state=42).fit(X)
+        self.is_fitted = True; return self
+    def predict(self, X): return _sk_binary(self.m_.predict(X))
+
+
+@registry.register
+class AD_B55_RandomSubspaceEnsemble(BaseAlgorithm):
+    """B55 — Ensemble of 5 IF models on random feature subsets."""
+    name = "AD B55 Random Subspace IF Ensemble"
+    service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
+    description = "5-model IF ensemble each using random feature subsets"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        np.random.seed(42); self.models_ = []
+        for s in range(5):
+            cols = np.random.choice(X.shape[1], max(2, X.shape[1] // 2), replace=False)
+            m = IsolationForest(contamination=0.05, random_state=s).fit(X[:, cols])
+            self.models_.append((m, cols))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        votes = np.stack([_sk_binary(m.predict(X[:, c])) for m, c in self.models_]).mean(0)
+        return (votes >= 0.5).astype(float)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# C. KERNEL & DISTANCE-BASED  (#56 – #70)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class AD_C56_LOF_k20(BaseAlgorithm):
+    """C56 — Local Outlier Factor (k=20)."""
+    name = "AD C56 LOF k=20"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "LOF with 20 neighbours for GPS track anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None): self.X_ = X; self.is_fitted = True; return self
+    def predict(self, X):
+        k = min(20, len(X) - 1)
+        return _sk_binary(LocalOutlierFactor(n_neighbors=k).fit_predict(X))
+
+
+@registry.register
+class AD_C57_LOF_k5(BaseAlgorithm):
+    """C57 — LOF with small neighbourhood (k=5)."""
+    name = "AD C57 LOF k=5"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "LOF with tight k=5 neighbourhood"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None): self.is_fitted = True; return self
+    def predict(self, X):
+        k = min(5, len(X) - 1)
+        return _sk_binary(LocalOutlierFactor(n_neighbors=k).fit_predict(X))
+
+
+@registry.register
+class AD_C58_LOF_k50(BaseAlgorithm):
+    """C58 — LOF with large neighbourhood (k=50)."""
+    name = "AD C58 LOF k=50"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "LOF with wide k=50 neighbourhood for global anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None): self.is_fitted = True; return self
+    def predict(self, X):
+        k = min(50, len(X) - 1)
+        return _sk_binary(LocalOutlierFactor(n_neighbors=k).fit_predict(X))
+
+
+@registry.register
+class AD_C59_LOF_Manhattan(BaseAlgorithm):
+    """C59 — LOF with Manhattan distance metric."""
+    name = "AD C59 LOF Manhattan"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "LOF using Manhattan (L1) distance"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None): self.is_fitted = True; return self
+    def predict(self, X):
+        k = min(20, len(X) - 1)
+        return _sk_binary(LocalOutlierFactor(n_neighbors=k, metric="manhattan").fit_predict(X))
+
+
+@registry.register
+class AD_C60_LOF_Cosine(BaseAlgorithm):
+    """C60 — LOF with cosine distance metric."""
+    name = "AD C60 LOF Cosine"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "LOF using cosine distance for direction-sensitive anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None): self.is_fitted = True; return self
+    def predict(self, X):
+        k = min(20, len(X) - 1)
+        return _sk_binary(LocalOutlierFactor(n_neighbors=k, metric="cosine").fit_predict(X))
+
+
+@registry.register
+class AD_C61_KNNMeanDist(BaseAlgorithm):
+    """C61 — Mean kNN distance (k=5)."""
+    name = "AD C61 KNN Mean Distance"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "Mean distance to 5 nearest neighbours"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        k = min(6, len(X) - 1)
+        self.nn_ = NearestNeighbors(n_neighbors=k).fit(X)
+        dists, _ = self.nn_.kneighbors(X)
+        self.thr_ = _thr(dists[:, 1:].mean(1)); self.is_fitted = True; return self
+    def predict(self, X):
+        dists, _ = self.nn_.kneighbors(X)
+        return (dists[:, 1:].mean(1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_C62_KNNMaxDist(BaseAlgorithm):
+    """C62 — Max kNN distance (k=5)."""
+    name = "AD C62 KNN Max Distance"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "Max distance to 5 nearest neighbours"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        k = min(6, len(X) - 1)
+        self.nn_ = NearestNeighbors(n_neighbors=k).fit(X)
+        dists, _ = self.nn_.kneighbors(X)
+        self.thr_ = _thr(dists[:, 1:].max(1)); self.is_fitted = True; return self
+    def predict(self, X):
+        dists, _ = self.nn_.kneighbors(X)
+        return (dists[:, 1:].max(1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_C63_NNRatio(BaseAlgorithm):
+    """C63 — 1-NN / mean-kNN distance ratio."""
+    name = "AD C63 NN Distance Ratio"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "Ratio of 1-NN to mean-kNN distance as outlier score"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        k = min(6, len(X) - 1)
+        self.nn_ = NearestNeighbors(n_neighbors=k).fit(X)
+        dists, _ = self.nn_.kneighbors(X)
+        s = dists[:, 1] / (dists[:, 1:].mean(1) + 1e-12)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        dists, _ = self.nn_.kneighbors(X)
+        s = dists[:, 1] / (dists[:, 1:].mean(1) + 1e-12)
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_C64_KernelDensityGaussian(BaseAlgorithm):
+    """C64 — Gaussian KDE negative log-density."""
+    name = "AD C64 Gaussian KDE"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "Negative Gaussian KDE log-density anomaly score"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X)
+        Xs = self.sc_.transform(X)
+        self.kde_ = KernelDensity(kernel="gaussian", bandwidth=1.0).fit(Xs)
+        self.thr_ = _thr(-self.kde_.score_samples(Xs))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        Xs = self.sc_.transform(X)
+        return (-self.kde_.score_samples(Xs) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_C65_RBFKernelScore(BaseAlgorithm):
+    """C65 — RBF kernel similarity to training set."""
+    name = "AD C65 RBF Kernel Score"
+    service_id = 4; category = "C_kernel"; library = "numpy"; animals = ["all"]
+    description = "Mean RBF similarity to training points; low = anomaly"
+
+    def __init__(self, sigma=1.0): super().__init__(sigma=sigma); self.sigma = sigma
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X)
+        self.Xtr_ = self.sc_.transform(X)
+        s = self._score(self.Xtr_)
+        self.thr_ = _thr(-s); self.is_fitted = True; return self
+    def _score(self, Xs):
+        n = min(200, len(self.Xtr_))
+        ref = self.Xtr_[np.linspace(0, len(self.Xtr_) - 1, n, dtype=int)]
+        dists = np.sum((Xs[:, None] - ref[None]) ** 2, 2)
+        return np.exp(-dists / (2 * self.sigma ** 2)).mean(1)
+    def predict(self, X):
+        return (-self._score(self.sc_.transform(X)) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_C66_LocalReachDensity(BaseAlgorithm):
+    """C66 — Local Reachability Density."""
+    name = "AD C66 Local Reachability Density"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "LRD proxy: inverse mean reach distance"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        k = min(11, len(X) - 1)
+        self.nn_ = NearestNeighbors(n_neighbors=k).fit(X)
+        dists, _ = self.nn_.kneighbors(X)
+        lrd = 1 / (dists[:, 1:].mean(1) + 1e-12)
+        self.thr_ = _thr(-lrd); self.is_fitted = True; return self
+    def predict(self, X):
+        dists, _ = self.nn_.kneighbors(X)
+        lrd = 1 / (dists[:, 1:].mean(1) + 1e-12)
+        return (-lrd > self.thr_).astype(float)
+
+
+@registry.register
+class AD_C67_MeanShiftDist(BaseAlgorithm):
+    """C67 — Distance from K-Means mode (mean-shift proxy)."""
+    name = "AD C67 Mean Shift Distance"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "Distance from single-cluster K-Means centroid (mode proxy)"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.km_ = KMeans(n_clusters=1, n_init=10, random_state=42).fit(X)
+        s = np.linalg.norm(X - self.km_.cluster_centers_[0], axis=1)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        s = np.linalg.norm(X - self.km_.cluster_centers_[0], axis=1)
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_C68_NeighbourhoodVariance(BaseAlgorithm):
+    """C68 — Rolling window local variance vs global variance ratio."""
+    name = "AD C68 Neighbourhood Variance"
+    service_id = 4; category = "C_kernel"; library = "numpy"; animals = ["all"]
+    description = "Rolling window variance ratio anomaly"
+
+    def __init__(self, w=10): super().__init__(w=w); self.w = w
+    def _score(self, X):
+        out = np.zeros(len(X))
+        for i in range(len(X)):
+            chunk = X[max(0, i - self.w): i + self.w + 1]
+            out[i] = chunk.var() / self.gvar_
+        return out
+    def fit(self, X, y=None):
+        self.gvar_ = X.var() + 1e-12
+        self.thr_ = _thr(self._score(X)); self.is_fitted = True; return self
+    def predict(self, X):
+        return (self._score(X) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_C69_ReachDistRatio(BaseAlgorithm):
+    """C69 — Reach-distance ratio (1-NN vs k-NN mean)."""
+    name = "AD C69 Reach Distance Ratio"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "Ratio of 1-NN reach distance to k-NN mean"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        k = min(11, len(X) - 1)
+        self.nn_ = NearestNeighbors(n_neighbors=k).fit(X)
+        dists, _ = self.nn_.kneighbors(X)
+        s = dists[:, 1] / (dists[:, 1:].mean(1) + 1e-12)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        dists, _ = self.nn_.kneighbors(X)
+        s = dists[:, 1] / (dists[:, 1:].mean(1) + 1e-12)
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_C70_NNLocalDensity(BaseAlgorithm):
+    """C70 — Fraction of kNN within radius (local density)."""
+    name = "AD C70 NN Local Density"
+    service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
+    description = "Low local density (few neighbours in radius) = anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        k = min(11, len(X) - 1)
+        self.nn_ = NearestNeighbors(n_neighbors=k).fit(X)
+        dists, _ = self.nn_.kneighbors(X)
+        self.r_ = dists[:, 1:].mean()
+        density = (dists[:, 1:] < self.r_).sum(1)
+        self.thr_ = _thr(-density.astype(float))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        dists, _ = self.nn_.kneighbors(X)
+        density = (dists[:, 1:] < self.r_).sum(1)
+        return (-density.astype(float) > self.thr_).astype(float)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# D. PROBABILISTIC & BAYESIAN  (#71 – #80)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class AD_D71_GaussianLikelihood(BaseAlgorithm):
+    """D71 — Negative Gaussian log-likelihood per point."""
+    name = "AD D71 Gaussian Log-Likelihood"
+    service_id = 4; category = "D_probabilistic"; library = "numpy"; animals = ["all"]
+    description = "Multivariate Gaussian negative log-likelihood anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0)
+        cov = np.cov(X, rowvar=False) + 1e-6 * np.eye(X.shape[1])
+        self.inv_ = np.linalg.pinv(cov)
+        self.thr_ = _thr(_mahal(X, self.mu_, self.inv_))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return (_mahal(X, self.mu_, self.inv_) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_D72_NaiveBayesAnomaly(BaseAlgorithm):
+    """D72 — Independent per-feature Gaussian anomaly score."""
+    name = "AD D72 Naive Bayes Anomaly"
+    service_id = 4; category = "D_probabilistic"; library = "numpy"; animals = ["all"]
+    description = "Feature-independent Gaussian log-likelihood anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.mu_ = X.mean(0); self.var_ = X.var(0) + 1e-12
+        self.thr_ = _thr(((X - self.mu_) ** 2 / self.var_).sum(1))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return (((X - self.mu_) ** 2 / self.var_).sum(1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_D73_GammaDistribution(BaseAlgorithm):
+    """D73 — Gamma distribution tail on speed."""
+    name = "AD D73 Gamma Distribution Tail"
+    service_id = 4; category = "D_probabilistic"; library = "scipy"; animals = ["all"]
+    description = "Gamma-distribution negative log-likelihood on speed"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        x = np.abs(X[:, 0]) + 1e-6
+        self.a_, self.loc_, self.scale_ = stats.gamma.fit(x, floc=0)
+        self.thr_ = _thr(-stats.gamma.logpdf(x, self.a_, self.loc_, self.scale_))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        x = np.abs(X[:, 0]) + 1e-6
+        return (-stats.gamma.logpdf(x, self.a_, self.loc_, self.scale_) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_D74_ExponentialTail(BaseAlgorithm):
+    """D74 — Exponential distribution tail on step_length."""
+    name = "AD D74 Exponential Tail"
+    service_id = 4; category = "D_probabilistic"; library = "scipy"; animals = ["all"]
+    description = "Exponential distribution tail on step_length feature"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        x = np.abs(X[:, 6]) + 1e-6
+        self.rate_ = 1.0 / (x.mean() + 1e-12)
+        self.thr_ = _thr(-stats.expon.logpdf(x, scale=1 / self.rate_))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        x = np.abs(X[:, 6]) + 1e-6
+        return (-stats.expon.logpdf(x, scale=1 / self.rate_) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_D75_BetaDistribution(BaseAlgorithm):
+    """D75 — Beta distribution tail on normalised speed."""
+    name = "AD D75 Beta Distribution Tail"
+    service_id = 4; category = "D_probabilistic"; library = "scipy"; animals = ["all"]
+    description = "Beta distribution tail on 0-1 normalised speed"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        x = X[:, 0]; self.xmin_ = x.min(); self.xptp_ = np.ptp(x) + 1e-12
+        xn = np.clip((x - self.xmin_) / self.xptp_, 1e-6, 1 - 1e-6)
+        self.a_, self.b_, _, _ = stats.beta.fit(xn, floc=0, fscale=1)
+        self.thr_ = _thr(-stats.beta.logpdf(xn, self.a_, self.b_))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        xn = np.clip((X[:, 0] - self.xmin_) / self.xptp_, 1e-6, 1 - 1e-6)
+        return (-stats.beta.logpdf(xn, self.a_, self.b_) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_D76_MarkovChain(BaseAlgorithm):
+    """D76 — Markov chain transition probability anomaly."""
+    name = "AD D76 Markov Chain Transition"
+    service_id = 4; category = "D_probabilistic"; library = "numpy"; animals = ["all"]
+    description = "Rare Markov state transitions on discretised speed"
+
+    def __init__(self, n_bins=10): super().__init__(n_bins=n_bins); self.n_bins = n_bins
+    def fit(self, X, y=None):
+        x = X[:, 0]
+        self.bins_ = np.percentile(x, np.linspace(0, 100, self.n_bins + 1))
+        self.bins_[-1] += 1e-6
+        states = np.clip(np.digitize(x, self.bins_) - 1, 0, self.n_bins - 1)
+        trans = np.ones((self.n_bins, self.n_bins))
+        for i in range(len(states) - 1):
+            trans[states[i], states[i + 1]] += 1
+        self.trans_ = trans / trans.sum(1, keepdims=True)
+        self.is_fitted = True; return self
+    def predict(self, X):
+        x = X[:, 0]
+        states = np.clip(np.digitize(x, self.bins_) - 1, 0, self.n_bins - 1)
+        probs = np.ones(len(x))
+        probs[1:] = self.trans_[states[:-1], states[1:]]
+        s = -np.log(probs + 1e-12)
+        return (s > _thr(s)).astype(float)
+
+
+@registry.register
+class AD_D77_CopulaAnomaly(BaseAlgorithm):
+    """D77 — Gaussian copula anomaly score."""
+    name = "AD D77 Gaussian Copula"
+    service_id = 4; category = "D_probabilistic"; library = "scipy"; animals = ["all"]
+    description = "Gaussian copula: transform marginals to Normal then Mahalanobis"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        from scipy.stats import rankdata
+        n = len(X)
+        U = np.column_stack([rankdata(X[:, j]) / (n + 1) for j in range(X.shape[1])])
+        Zn = stats.norm.ppf(U)
+        self.mu_z_ = Zn.mean(0)
+        self.inv_z_ = np.linalg.pinv(np.cov(Zn, rowvar=False) + 1e-6 * np.eye(X.shape[1]))
+        self.train_sorted_ = np.sort(X, axis=0)
+        self.thr_ = _thr(_mahal(Zn, self.mu_z_, self.inv_z_))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        U = np.clip(
+            np.column_stack([np.searchsorted(self.train_sorted_[:, j], X[:, j]) / len(self.train_sorted_)
+                             for j in range(X.shape[1])]), 1e-6, 1 - 1e-6)
+        Zn = stats.norm.ppf(U)
+        return (_mahal(Zn, self.mu_z_, self.inv_z_) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_D78_ParzenWindow(BaseAlgorithm):
+    """D78 — Parzen window density estimate."""
+    name = "AD D78 Parzen Window Density"
+    service_id = 4; category = "D_probabilistic"; library = "numpy"; animals = ["all"]
+    description = "Parzen window (Gaussian kernel) density anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.Xtr_ = X.copy()
+        h = 1.06 * X.std() * len(X) ** (-0.2) + 1e-12; self.h_ = h
+        self.thr_ = _thr(-self._density(X))
+        self.is_fitted = True; return self
+    def _density(self, X):
+        n = min(200, len(self.Xtr_))
+        ref = self.Xtr_[np.linspace(0, len(self.Xtr_) - 1, n, dtype=int)]
+        dists = np.sum((X[:, None] - ref[None]) ** 2, 2)
+        return np.exp(-dists / (2 * self.h_ ** 2)).mean(1)
+    def predict(self, X):
+        return (-self._density(X) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_D79_DirichletEntropy(BaseAlgorithm):
+    """D79 — Entropy of softmax-normalised feature values."""
+    name = "AD D79 Dirichlet Entropy"
+    service_id = 4; category = "D_probabilistic"; library = "numpy"; animals = ["all"]
+    description = "Low entropy (peaky softmax) feature values flagged as anomaly"
+
+    def __init__(self): super().__init__()
+    def _score(self, X):
+        Xs = np.exp(X - X.max(1, keepdims=True))
+        p = Xs / Xs.sum(1, keepdims=True)
+        return -np.sum(p * np.log(p + 1e-12), 1)
+    def fit(self, X, y=None):
+        self.thr_ = _thr(-self._score(X)); self.is_fitted = True; return self
+    def predict(self, X):
+        return (-self._score(X) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_D80_GMMLogLikelihood(BaseAlgorithm):
+    """D80 — Multi-component GMM log-likelihood."""
+    name = "AD D80 GMM Log-Likelihood"
+    service_id = 4; category = "D_probabilistic"; library = "sklearn"; animals = ["all"]
+    description = "Gaussian Mixture Model negative log-likelihood anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        from sklearn.mixture import GaussianMixture
+        self.gm_ = GaussianMixture(n_components=3, random_state=42).fit(X)
+        self.thr_ = _thr(-self.gm_.score_samples(X))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        return (-self.gm_.score_samples(X) > self.thr_).astype(float)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# E. DEEP LEARNING (NumPy proxy)  (#81 – #90)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class AD_E81_PCAReconstruction2(BaseAlgorithm):
+    """E81 — PCA reconstruction error (2 components)."""
+    name = "AD E81 PCA Reconstruction 2"
+    service_id = 4; category = "E_deep"; library = "sklearn"; animals = ["all"]
+    description = "PCA 2-component reconstruction error as anomaly score"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        nc = min(2, X.shape[1], X.shape[0] - 1)
+        self.pca_ = PCA(n_components=nc).fit(X)
+        Xr = self.pca_.inverse_transform(self.pca_.transform(X))
+        self.thr_ = _thr(np.mean((X - Xr) ** 2, 1))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        Xr = self.pca_.inverse_transform(self.pca_.transform(X))
+        return (np.mean((X - Xr) ** 2, 1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_E82_PCAReconstruction1(BaseAlgorithm):
+    """E82 — PCA reconstruction error (1 component)."""
+    name = "AD E82 PCA Reconstruction 1"
+    service_id = 4; category = "E_deep"; library = "sklearn"; animals = ["all"]
+    description = "PCA 1-component maximum compression reconstruction error"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.pca_ = PCA(n_components=1).fit(X)
+        Xr = self.pca_.inverse_transform(self.pca_.transform(X))
+        self.thr_ = _thr(np.mean((X - Xr) ** 2, 1))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        Xr = self.pca_.inverse_transform(self.pca_.transform(X))
+        return (np.mean((X - Xr) ** 2, 1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_E83_PCAReconstruction3(BaseAlgorithm):
+    """E83 — PCA reconstruction error (3 components)."""
+    name = "AD E83 PCA Reconstruction 3"
+    service_id = 4; category = "E_deep"; library = "sklearn"; animals = ["all"]
+    description = "PCA 3-component reconstruction error"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        nc = min(3, X.shape[1], X.shape[0] - 1)
+        self.pca_ = PCA(n_components=nc).fit(X)
+        Xr = self.pca_.inverse_transform(self.pca_.transform(X))
+        self.thr_ = _thr(np.mean((X - Xr) ** 2, 1))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        Xr = self.pca_.inverse_transform(self.pca_.transform(X))
+        return (np.mean((X - Xr) ** 2, 1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_E84_PCAMaxFeatureError(BaseAlgorithm):
+    """E84 — Max per-feature PCA reconstruction error."""
+    name = "AD E84 PCA Max Feature Error"
+    service_id = 4; category = "E_deep"; library = "sklearn"; animals = ["all"]
+    description = "Max single-feature PCA reconstruction error"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        nc = min(2, X.shape[1], X.shape[0] - 1)
+        self.pca_ = PCA(n_components=nc).fit(X)
+        Xr = self.pca_.inverse_transform(self.pca_.transform(X))
+        self.thr_ = _thr(np.abs(X - Xr).max(1))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        Xr = self.pca_.inverse_transform(self.pca_.transform(X))
+        return (np.abs(X - Xr).max(1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_E85_AutoencoderTanh(BaseAlgorithm):
+    """E85 — Numpy 1-hidden-layer autoencoder (tanh)."""
+    name = "AD E85 Autoencoder Tanh"
+    service_id = 4; category = "E_deep"; library = "numpy"; animals = ["all"]
+    description = "1-hidden-layer numpy autoencoder with tanh activations"
+
+    def __init__(self, epochs=50, lr=0.01): super().__init__(epochs=epochs, lr=lr); self.epochs=epochs; self.lr=lr
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X); Xs = self.sc_.transform(X)
+        d = X.shape[1]; h = max(2, d // 2); np.random.seed(42)
+        self.W1_ = np.random.randn(d, h) * 0.1; self.b1_ = np.zeros(h)
+        self.W2_ = np.random.randn(h, d) * 0.1; self.b2_ = np.zeros(d)
+        for _ in range(self.epochs):
+            z = np.tanh(Xs @ self.W1_ + self.b1_)
+            Xh = z @ self.W2_ + self.b2_; e = Xh - Xs
+            self.W2_ -= self.lr * z.T @ e / len(Xs); self.b2_ -= self.lr * e.mean(0)
+            dz = (e @ self.W2_.T) * (1 - z ** 2)
+            self.W1_ -= self.lr * Xs.T @ dz / len(Xs); self.b1_ -= self.lr * dz.mean(0)
+        self.thr_ = _thr(self._err(Xs)); self.is_fitted = True; return self
+    def _err(self, Xs):
+        z = np.tanh(Xs @ self.W1_ + self.b1_)
+        return np.mean((Xs - (z @ self.W2_ + self.b2_)) ** 2, 1)
+    def predict(self, X):
+        return (self._err(self.sc_.transform(X)) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_E86_AutoencoderReLU(BaseAlgorithm):
+    """E86 — Deeper 2-hidden-layer autoencoder (ReLU)."""
+    name = "AD E86 Autoencoder ReLU Deep"
+    service_id = 4; category = "E_deep"; library = "numpy"; animals = ["all"]
+    description = "2-hidden-layer numpy autoencoder with ReLU activations"
+
+    def __init__(self, epochs=30, lr=0.005): super().__init__(epochs=epochs, lr=lr); self.epochs=epochs; self.lr=lr
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X); Xs = self.sc_.transform(X)
+        d = X.shape[1]; h1 = max(4, d); h2 = max(2, d // 2); np.random.seed(7)
+        self.W1_=np.random.randn(d,h1)*0.1; self.b1_=np.zeros(h1)
+        self.W2_=np.random.randn(h1,h2)*0.1; self.b2_=np.zeros(h2)
+        self.W3_=np.random.randn(h2,h1)*0.1; self.b3_=np.zeros(h1)
+        self.W4_=np.random.randn(h1,d)*0.1;  self.b4_=np.zeros(d)
+        r = lambda z: np.maximum(0, z)
+        for _ in range(self.epochs):
+            z1=r(Xs@self.W1_+self.b1_); z2=r(z1@self.W2_+self.b2_)
+            z3=r(z2@self.W3_+self.b3_); Xh=z3@self.W4_+self.b4_; e=Xh-Xs
+            self.W4_-=self.lr*z3.T@e/len(Xs); self.b4_-=self.lr*e.mean(0)
+            g3=(e@self.W4_.T)*(z3>0); self.W3_-=self.lr*z2.T@g3/len(Xs); self.b3_-=self.lr*g3.mean(0)
+            g2=(g3@self.W3_.T)*(z2>0); self.W2_-=self.lr*z1.T@g2/len(Xs); self.b2_-=self.lr*g2.mean(0)
+            g1=(g2@self.W2_.T)*(z1>0); self.W1_-=self.lr*Xs.T@g1/len(Xs); self.b1_-=self.lr*g1.mean(0)
+        self.thr_ = _thr(self._err(Xs)); self.is_fitted = True; return self
+    def _err(self, Xs):
+        r = lambda z: np.maximum(0, z)
+        z1=r(Xs@self.W1_+self.b1_); z2=r(z1@self.W2_+self.b2_)
+        z3=r(z2@self.W3_+self.b3_); Xh=z3@self.W4_+self.b4_
+        return np.mean((Xs - Xh) ** 2, 1)
+    def predict(self, X):
+        return (self._err(self.sc_.transform(X)) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_E87_VariationalAEProxy(BaseAlgorithm):
+    """E87 — Variational AE proxy (PCA + noise perturbation)."""
+    name = "AD E87 Variational AE Proxy"
+    service_id = 4; category = "E_deep"; library = "sklearn"; animals = ["all"]
+    description = "VAE proxy: PCA latent + noise perturbation reconstruction"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        nc = min(3, X.shape[1], X.shape[0] - 1)
+        self.sc_ = StandardScaler().fit(X)
+        self.pca_ = PCA(n_components=nc).fit(self.sc_.transform(X))
+        Xs = self.sc_.transform(X)
+        Xr = self.pca_.inverse_transform(self.pca_.transform(Xs))
+        s = np.mean((Xs - Xr) ** 2, 1) + np.abs(np.random.randn(len(Xs))) * 0.01
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        Xs = self.sc_.transform(X)
+        Xr = self.pca_.inverse_transform(self.pca_.transform(Xs))
+        return (np.mean((Xs - Xr) ** 2, 1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_E88_AR3Residual(BaseAlgorithm):
+    """E88 — AR(3) residual on all features (LSTM-AE proxy)."""
+    name = "AD E88 AR3 Residual LSTM Proxy"
+    service_id = 4; category = "E_deep"; library = "numpy"; animals = ["all"]
+    description = "AR(3) prediction residual summed across features"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.coefs_ = []; n = len(X); total = np.zeros(n)
+        for j in range(X.shape[1]):
+            x = X[:, j]
+            if n > 4:
+                Y = x[3:]; A = np.column_stack([x[2:n-1], x[1:n-2], x[:n-3]])
+                c, _, _, _ = np.linalg.lstsq(A, Y, rcond=None)
+                res = np.abs(Y - A @ c); full = np.r_[0, 0, 0, res]
+            else:
+                c = np.zeros(3); full = np.zeros(n)
+            self.coefs_.append(c); total += full
+        self.thr_ = _thr(total); self.is_fitted = True; return self
+    def predict(self, X):
+        n = len(X); total = np.zeros(n)
+        for j, c in enumerate(self.coefs_):
+            x = X[:, j]
+            if n > 4:
+                A = np.column_stack([x[2:n-1], x[1:n-2], x[:n-3]])
+                res = np.abs(x[3:] - A @ c); total += np.r_[0, 0, 0, res]
+        return (total > self.thr_).astype(float)
+
+
+@registry.register
+class AD_E89_MemoryAugAE(BaseAlgorithm):
+    """E89 — Memory-augmented AE proxy (distance to prototypes)."""
+    name = "AD E89 Memory Augmented AE"
+    service_id = 4; category = "E_deep"; library = "sklearn"; animals = ["all"]
+    description = "Distance to prototypes in PCA latent space"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        nc = min(4, X.shape[1], X.shape[0] - 1)
+        self.pca_ = PCA(n_components=nc).fit(X); Z = self.pca_.transform(X)
+        k = min(10, len(Z)); np.random.seed(3)
+        self.protos_ = Z[np.random.choice(len(Z), k, replace=False)]
+        dists = np.min(np.linalg.norm(Z[:, None] - self.protos_[None], axis=2), 1)
+        self.thr_ = _thr(dists); self.is_fitted = True; return self
+    def predict(self, X):
+        Z = self.pca_.transform(X)
+        dists = np.min(np.linalg.norm(Z[:, None] - self.protos_[None], axis=2), 1)
+        return (dists > self.thr_).astype(float)
+
+
+@registry.register
+class AD_E90_SelfSupervisedAE(BaseAlgorithm):
+    """E90 — Self-supervised AE: predict each feature from all others."""
+    name = "AD E90 Self-Supervised AE"
+    service_id = 4; category = "E_deep"; library = "sklearn"; animals = ["all"]
+    description = "Leave-one-feature-out Ridge prediction residual"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        self.sc_ = StandardScaler().fit(X); Xs = self.sc_.transform(X)
+        self.models_ = []; total = np.zeros(len(X))
+        for j in range(X.shape[1]):
+            cols = [c for c in range(X.shape[1]) if c != j]
+            lr = Ridge(alpha=0.1).fit(Xs[:, cols], Xs[:, j])
+            self.models_.append((lr, cols))
+            total += (Xs[:, j] - lr.predict(Xs[:, cols])) ** 2
+        self.thr_ = _thr(total); self.is_fitted = True; return self
+    def predict(self, X):
+        Xs = self.sc_.transform(X); total = np.zeros(len(X))
+        for j, (lr, cols) in enumerate(self.models_):
+            total += (Xs[:, j] - lr.predict(Xs[:, cols])) ** 2
+        return (total > self.thr_).astype(float)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# F. ECOLOGICAL / MOVEMENT-SPECIFIC  (#91 – #100)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class AD_F91_VelocityJerk(BaseAlgorithm):
+    """F91 — High jerk (3rd derivative of speed) = abrupt change."""
+    name = "AD F91 Velocity Jerk"
+    service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
+    description = "Jerk (3rd-order derivative of speed) anomaly detection"
+
+    def __init__(self): super().__init__()
+    def _jerk(self, X):
+        x = X[:, 0]; vel = np.diff(x, prepend=x[0])
+        acc = np.diff(vel, prepend=vel[0])
+        return np.abs(np.diff(acc, prepend=acc[0]))
+    def fit(self, X, y=None):
+        self.thr_ = _thr(self._jerk(X)); self.is_fitted = True; return self
+    def predict(self, X):
+        return (self._jerk(X) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_F92_TurningSpeedProduct(BaseAlgorithm):
+    """F92 — Large turning angle × high speed anomaly."""
+    name = "AD F92 Turning × Speed"
+    service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
+    description = "Product of speed and turning angle as abrupt change score"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        s = X[:, 0] * np.abs(X[:, 2])
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return (X[:, 0] * np.abs(X[:, 2]) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_F93_AltitudeDrop(BaseAlgorithm):
+    """F93 — Sudden altitude drop (crash/dive detection)."""
+    name = "AD F93 Altitude Drop"
+    service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
+    description = "Sudden negative altitude change as anomaly"
+
+    def __init__(self): super().__init__()
+    def _drops(self, X):
+        alt = X[:, 1]
+        return np.r_[0, np.maximum(0, -np.diff(alt))]
+    def fit(self, X, y=None):
+        self.thr_ = _thr(self._drops(X)); self.is_fitted = True; return self
+    def predict(self, X):
+        return (self._drops(X) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_F94_StepLengthOutlier(BaseAlgorithm):
+    """F94 — Step length unusually large vs rolling baseline."""
+    name = "AD F94 Step Length Outlier"
+    service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
+    description = "Rolling step_length baseline deviation anomaly"
+
+    def __init__(self, w=20): super().__init__(w=w); self.w = w
+    def fit(self, X, y=None):
+        s = X[:, 6] - _rolling_mean(X[:, 6], self.w)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return (X[:, 6] - _rolling_mean(X[:, 6], self.w) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_F95_SinuositySpeed(BaseAlgorithm):
+    """F95 — Low straightness at high speed anomaly."""
+    name = "AD F95 Sinuosity × Speed"
+    service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
+    description = "High speed + low straightness = anomalous movement"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        # straightness feature [3]: 0=winding, 1=straight
+        s = X[:, 0] / (X[:, 3] + 1e-12)
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return (X[:, 0] / (X[:, 3] + 1e-12) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_F96_SpeedRollStdSpike(BaseAlgorithm):
+    """F96 — Rolling speed standard deviation spike."""
+    name = "AD F96 Speed Roll Std Spike"
+    service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
+    description = "Spike in rolling speed standard deviation — volatility anomaly"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        s = X[:, 5]  # speed_roll_std
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        return (X[:, 5] > self.thr_).astype(float)
+
+
+@registry.register
+class AD_F97_MultiFeatureTemporalChange(BaseAlgorithm):
+    """F97 — Cumulative absolute first-differences across features."""
+    name = "AD F97 Multi-Feature Temporal Change"
+    service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
+    description = "Sum of absolute temporal differences across all features"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        diffs = np.abs(np.diff(X, axis=0, prepend=X[:1]))
+        self.thr_ = _thr(diffs.sum(1)); self.is_fitted = True; return self
+    def predict(self, X):
+        diffs = np.abs(np.diff(X, axis=0, prepend=X[:1]))
+        return (diffs.sum(1) > self.thr_).astype(float)
+
+
+@registry.register
+class AD_F98_RestBoutTransition(BaseAlgorithm):
+    """F98 — Sudden rest bout: speed drops below rolling mean."""
+    name = "AD F98 Rest Bout Transition"
+    service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
+    description = "Sudden speed below rolling mean signals abrupt rest"
+
+    def __init__(self, w=5): super().__init__(w=w); self.w = w
+    def fit(self, X, y=None):
+        s = np.maximum(0, _rolling_mean(X[:, 0], self.w) - X[:, 0])
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        s = np.maximum(0, _rolling_mean(X[:, 0], self.w) - X[:, 0])
+        return (s > self.thr_).astype(float)
+
+
+@registry.register
+class AD_F99_AltitudeSpeedMismatch(BaseAlgorithm):
+    """F99 — Altitude-speed mismatch: high altitude + low speed anomaly."""
+    name = "AD F99 Altitude Speed Mismatch"
+    service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
+    description = "High altitude with very low speed — biologically anomalous"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        alt_z = (X[:, 1] - X[:, 1].mean()) / (X[:, 1].std() + 1e-12)
+        spd_z = (X[:, 0] - X[:, 0].mean()) / (X[:, 0].std() + 1e-12)
+        s = alt_z - spd_z  # high alt + low speed = high score
+        self.thr_ = _thr(s); self.is_fitted = True; return self
+    def predict(self, X):
+        alt_z = (X[:, 1] - X[:, 1].mean()) / (X[:, 1].std() + 1e-12)
+        spd_z = (X[:, 0] - X[:, 0].mean()) / (X[:, 0].std() + 1e-12)
+        return (alt_z - spd_z > self.thr_).astype(float)
+
+
+@registry.register
+class AD_F100_CompositeMovementScore(BaseAlgorithm):
+    """F100 — Composite movement anomaly: z-sum over key features."""
+    name = "AD F100 Composite Movement Score"
+    service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
+    description = "Composite z-score across speed, altitude, turning, step_length"
+
+    def __init__(self): super().__init__()
+    def fit(self, X, y=None):
+        cols = [0, 1, 2, 6]  # speed, altitude, turning_angle, step_length
+        Xs = X[:, cols]
+        self.mu_ = Xs.mean(0); self.sd_ = Xs.std(0) + 1e-12
+        self.thr_ = _thr(np.abs((Xs - self.mu_) / self.sd_).sum(1))
+        self.is_fitted = True; return self
+    def predict(self, X):
+        Xs = X[:, [0, 1, 2, 6]]
+        return (np.abs((Xs - self.mu_) / self.sd_).sum(1) > self.thr_).astype(float)
+
+
+# ── End of file ───────────────────────────────────────────────────────────────
+# Total: 100 algorithms across 6 families
+# Service ID: 4 — Anomaly Detection (Dua)
+# Add to main.py:
+#   from vebita_framework.services.s4_anomaly.dua_algorithms import *

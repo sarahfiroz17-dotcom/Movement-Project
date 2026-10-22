@@ -1,0 +1,74 @@
+
+==================================================
+  VEBITA Algorithm Registry
+  Total algorithms registered: 150
+==================================================
+  S1 Time Series                     25 algorithms
+  S2 Pattern Recognition             25 algorithms
+  S3 Environmental Factors           25 algorithms
+  S4 Anomaly Detection               25 algorithms
+  S5 Trajectory Segmentation         25 algorithms
+  S6 Behavioural Classification      25 algorithms
+--------------------------------------------------
+  By category:
+    clustering                 19
+    statistical                16
+    B_tree                      8
+    A_linear                    8
+    forecasting                 7
+    deep_learning               7
+    motif_discovery             7
+    ml_supervised               7
+    A_statistical               7
+    C_kernel                    7
+    decomposition               6
+    D_probabilistic             6
+    time_series                 5
+    E_deep                      5
+    F_ecological                5
+    changepoint                 5
+    signal_processing           4
+    dimensionality_reduction    4
+    hmm                         4
+    ecology                     3
+    supervised                  2
+    sequential_pattern          2
+    spatial                     2
+    ecological                  2
+    correlation                 1
+    anomaly_detection           1
+==================================================
+
+Loading data: animal=red_kite, points=1200
+Data ready: 62011 train / 15503 test | behaviors: []
+
+
+=======================================================
+  VEBITA Benchmark — All services
+  150 algorithms | Animal: red_kite | 62011 train / 15503 test points
+=======================================================
+[S3] Starting Speed-Altitude Correlation
+Command terminated by signal 9
+	Command being timed: "/sessions/rcw-01yxxa264jhrfaa3hmg6j3dq/mnt/Movement Project/Movement Project/vebita_shared_framework (2)/vebita_shared_framework/backend/vebita_framework/venv_mac/bin/python3 run_benchmark.py --csv /sessions/rcw-01yxxa264jhrfaa3hmg6j3dq/mnt/Movement Project/Movement Project/vebita_shared_framework (2)/vebita_shared_framework/backend/vebita_framework/../uploads/9a52efaf8ac54dcd8873a08999f71576_LifeTrack Whooper Swan Latvia.csv --jobs 1 --output /sessions/rcw-01yxxa264jhrfaa3hmg6j3dq/mnt/Movement Project/Movement Project/vebita_shared_framework (2)/vebita_shared_framework/backend/vebita_framework/results/progressive/04_whooper_swan_17.6MB.csv"
+	User time (seconds): 19.05
+	System time (seconds): 1.08
+	Percent of CPU this job got: 98%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:20.53
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 3787396
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 703
+	Minor (reclaiming a frame) page faults: 1208684
+	Voluntary context switches: 8086
+	Involuntary context switches: 150
+	Swaps: 0
+	File system inputs: 776
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

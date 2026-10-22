@@ -1,0 +1,3717 @@
+"""
+services/s3_environment/sarah_algorithms.py
+============================================
+VEBITA — Service 3: Environmental Factors (Sarah)
+
+100+ algorithms studying how environmental variables
+(temperature, NDVI, terrain, weather, land cover, etc.)
+relate to and influence animal movement from Movebank data.
+
+To register in run_benchmark.py, add at the top:
+    from services.s3_environment.sarah_algorithms import *
+
+Feature matrix X shape: (n_points, 8)
+    speed_ms, altitude_m, turning_angle, straightness,
+    speed_roll_mean, speed_roll_std, step_length_m, alt_roll_mean
+
+Service ID: 3
+"""
+
+import numpy as np
+from sklearn.linear_model import (
+    LinearRegression, Ridge, Lasso, ElasticNet, HuberRegressor,
+    QuantileRegressor, BayesianRidge, TweedieRegressor,
+    OrthogonalMatchingPursuit, PassiveAggressiveRegressor, SGDRegressor,
+)
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.pipeline import Pipeline
+from sklearn.decomposition import PCA, FastICA, NMF, TruncatedSVD
+from sklearn.cross_decomposition import PLSRegression, CCA
+from sklearn.ensemble import (
+    RandomForestRegressor, RandomForestClassifier,
+    GradientBoostingRegressor, GradientBoostingClassifier,
+    ExtraTreesRegressor, AdaBoostRegressor, BaggingRegressor,
+    StackingRegressor, VotingRegressor, IsolationForest,
+)
+from sklearn.svm import SVR, SVC
+from sklearn.neighbors import KNeighborsRegressor, KNeighborsClassifier
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.naive_bayes import GaussianNB
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, Matern, DotProduct, WhiteKernel
+from sklearn.cluster import (
+    KMeans, AgglomerativeClustering, DBSCAN, SpectralClustering,
+    Birch, MeanShift, OPTICS, MiniBatchKMeans,
+)
+from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
+from sklearn.manifold import TSNE
+from sklearn.inspection import permutation_importance
+from sklearn.model_selection import cross_val_score
+from sklearn.metrics import r2_score
+from sklearn.covariance import EmpiricalCovariance, MinCovDet
+from scipy import stats
+from scipy.signal import savgol_filter, periodogram, welch
+from scipy.spatial.distance import cdist
+
+try:
+    from xgboost import XGBRegressor, XGBClassifier
+    _HAS_XGB = True
+except ImportError:
+    _HAS_XGB = False
+
+try:
+    from lightgbm import LGBMRegressor, LGBMClassifier
+    _HAS_LGB = True
+except ImportError:
+    _HAS_LGB = False
+
+try:
+    from catboost import CatBoostRegressor
+    _HAS_CAT = True
+except ImportError:
+    _HAS_CAT = False
+
+try:
+    import hdbscan
+    _HAS_HDBSCAN = True
+except ImportError:
+    _HAS_HDBSCAN = False
+
+from core.base import BaseAlgorithm
+from core.registry import registry
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HELPER: synthetic environmental features derived from movement data
+# In real Movebank use, these would come from raster layers (GEE, ERA5, SRTM).
+# Here we derive proxies from the 8 movement features.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _env_features(X: np.ndarray) -> np.ndarray:
+    """
+    Derive 12 synthetic environmental proxy features from movement features.
+    Columns returned:
+        0  terrain_ruggedness  (alt variability proxy)
+        1  slope               (alt gradient)
+        2  ndvi_proxy          (speed × turning, vegetation friction)
+        3  land_cover          (cluster ID from altitude + speed)
+        4  wind_proxy          (speed_roll_std — gust proxy)
+        5  temperature_proxy   (−altitude, lapse-rate proxy)
+        6  proximity_water     (low speed + low alt proxy)
+        7  solar_radiation     (straightness × speed)
+        8  resource_score      (1 / (turning_angle + 1))
+        9  elevation_gradient  (alt_roll_mean gradient)
+       10  habitat_boundary    (turning_angle spike)
+       11  energy_expenditure  (speed² proxy)
+    """
+    speed       = X[:, 0]   # speed_ms
+    alt         = X[:, 1]   # altitude_m
+    turn        = X[:, 2]   # turning_angle
+    straight    = X[:, 3]   # straightness
+    spd_mean    = X[:, 4]   # speed_roll_mean
+    spd_std     = X[:, 5]   # speed_roll_std
+    step        = X[:, 6]   # step_length_m
+    alt_mean    = X[:, 7]   # alt_roll_mean
+
+    n = len(X)
+    terrain_rug     = np.abs(np.gradient(alt))
+    slope           = np.gradient(alt_mean)
+    ndvi_proxy      = speed * (1 / (turn + 1))
+    land_cover      = np.round(alt_mean / (alt_mean.max() + 1e-6) * 4).astype(float)
+    wind_proxy      = spd_std
+    temp_proxy      = -alt / (alt.max() + 1e-6)
+    prox_water      = ((speed < np.percentile(speed, 25)) & (alt < np.percentile(alt, 25))).astype(float)
+    solar           = straight * spd_mean
+    resource        = 1 / (turn + 1)
+    elev_grad       = np.gradient(alt)
+    hab_boundary    = (turn > np.percentile(turn, 90)).astype(float)
+    energy          = speed ** 2
+
+    return np.column_stack([
+        terrain_rug, slope, ndvi_proxy, land_cover,
+        wind_proxy, temp_proxy, prox_water, solar,
+        resource, elev_grad, hab_boundary, energy,
+    ])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORY 1 — STATISTICAL & REGRESSION MODELS  (algos 1–20)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class EnvLinearRegression(BaseAlgorithm):
+    """Predict animal speed from environmental proxy features via OLS."""
+    name        = "Env Linear Regression"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "OLS regression: environmental proxies → movement speed"
+
+    def __init__(self):
+        super().__init__()
+        self.model = LinearRegression()
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        target = X[:, 0]  # predict speed_ms
+        self.model.fit(E, target)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        return self.model.predict(E).astype(float)
+
+
+@registry.register
+class EnvRidgeRegression(BaseAlgorithm):
+    """Ridge (L2) regression of speed on environmental features."""
+    name        = "Env Ridge Regression"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "L2-regularised regression for environmental influence on speed"
+
+    def __init__(self, alpha: float = 1.0):
+        super().__init__(alpha=alpha)
+        self.model = Ridge(alpha=alpha)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.model.fit(E, X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvLassoRegression(BaseAlgorithm):
+    """Lasso (L1) regression — identifies sparse environmental predictors."""
+    name        = "Env Lasso Regression"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "L1-regularised regression; selects key environmental features"
+
+    def __init__(self, alpha: float = 0.1):
+        super().__init__(alpha=alpha)
+        self.model = Lasso(alpha=alpha, max_iter=5000)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.model.fit(E, X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvElasticNet(BaseAlgorithm):
+    """Elastic Net: combined L1+L2 for environmental feature selection."""
+    name        = "Env Elastic Net"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Elastic net regression balancing L1 sparsity and L2 stability"
+
+    def __init__(self, alpha: float = 0.1, l1_ratio: float = 0.5):
+        super().__init__(alpha=alpha, l1_ratio=l1_ratio)
+        self.model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=5000)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.model.fit(E, X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvPolynomialRegression(BaseAlgorithm):
+    """Polynomial regression to capture nonlinear environmental responses."""
+    name        = "Env Polynomial Regression"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Degree-2 polynomial regression on terrain and NDVI proxies"
+
+    def __init__(self, degree: int = 2):
+        super().__init__(degree=degree)
+        self.model = Pipeline([
+            ("poly", PolynomialFeatures(degree=degree, include_bias=False)),
+            ("reg",  LinearRegression()),
+        ])
+
+    def fit(self, X, y=None):
+        E = _env_features(X)[:, :4]  # terrain, slope, NDVI, land cover
+        self.model.fit(E, X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)[:, :4]).astype(float)
+
+
+@registry.register
+class EnvQuantileRegression(BaseAlgorithm):
+    """Quantile regression — models median environmental response robustly."""
+    name        = "Env Quantile Regression"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Quantile (median) regression of movement on environment"
+
+    def __init__(self, quantile: float = 0.5):
+        super().__init__(quantile=quantile)
+        self.model = QuantileRegressor(quantile=quantile, alpha=0.1, solver="highs")
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.model.fit(E, X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvBayesianRidge(BaseAlgorithm):
+    """Bayesian Ridge regression with automatic regularisation."""
+    name        = "Env Bayesian Ridge"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Bayesian regression with uncertainty on environmental effects"
+
+    def __init__(self):
+        super().__init__()
+        self.model = BayesianRidge()
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvHuberRegression(BaseAlgorithm):
+    """Robust Huber regression — resistant to outlier GPS fixes."""
+    name        = "Env Huber Regression"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Outlier-resistant regression for noisy GPS environments"
+
+    def __init__(self, epsilon: float = 1.35):
+        super().__init__(epsilon=epsilon)
+        self.model = HuberRegressor(epsilon=epsilon, max_iter=300)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvPLSRegression(BaseAlgorithm):
+    """Partial Least Squares: links environmental & movement latent factors."""
+    name        = "Env PLS Regression"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "PLS finds latent dimensions shared between environment and movement"
+
+    def __init__(self, n_components: int = 3):
+        super().__init__(n_components=n_components)
+        self.model = PLSRegression(n_components=n_components)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.model.fit(E, X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).ravel().astype(float)
+
+
+@registry.register
+class EnvPCRRegression(BaseAlgorithm):
+    """Principal Component Regression on environmental features."""
+    name        = "Env PCR Regression"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "PCA dimensionality reduction followed by linear regression"
+
+    def __init__(self, n_components: int = 5):
+        super().__init__(n_components=n_components)
+        self.model = Pipeline([
+            ("pca", PCA(n_components=n_components)),
+            ("reg", LinearRegression()),
+        ])
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.model.fit(E, X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvGLMPoisson(BaseAlgorithm):
+    """Poisson GLM — models count-like movement events vs environment."""
+    name        = "Env GLM Poisson"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Poisson GLM for step-count response to environmental gradients"
+
+    def __init__(self):
+        super().__init__()
+        self.model = TweedieRegressor(power=1, alpha=0.5, link="log", max_iter=300)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        target = np.abs(X[:, 6]) + 0.1  # step_length_m (positive)
+        self.model.fit(E, target)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvGLMGamma(BaseAlgorithm):
+    """Gamma GLM for positively-skewed movement rates."""
+    name        = "Env GLM Gamma"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Gamma GLM linking log-speed to environmental covariates"
+
+    def __init__(self):
+        super().__init__()
+        self.model = TweedieRegressor(power=2, alpha=0.5, link="log", max_iter=300)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        target = np.abs(X[:, 0]) + 0.01
+        self.model.fit(E, target)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvCanonicalCorrelation(BaseAlgorithm):
+    """CCA: maximum correlation between environmental and movement spaces."""
+    name        = "Env Canonical Correlation"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "CCA finds shared latent structure between environment and movement"
+
+    def __init__(self, n_components: int = 2):
+        super().__init__(n_components=n_components)
+        self.cca = CCA(n_components=n_components)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.cca.fit(E, X)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        Xc, _ = self.cca.transform(E, X)
+        return Xc[:, 0].astype(float)
+
+
+@registry.register
+class EnvSGDRegressor(BaseAlgorithm):
+    """Online SGD regression — efficient for large Movebank datasets."""
+    name        = "Env SGD Regressor"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Stochastic gradient descent regression on environmental inputs"
+
+    def __init__(self, alpha: float = 0.01):
+        super().__init__(alpha=alpha)
+        self.model = SGDRegressor(alpha=alpha, max_iter=1000, tol=1e-3)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvOrthogonalMatchingPursuit(BaseAlgorithm):
+    """OMP sparse regression — finds minimal environmental predictors."""
+    name        = "Env Orthogonal Matching Pursuit"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Sparse recovery: which environmental features matter most"
+
+    def __init__(self, n_nonzero_coefs: int = 4):
+        super().__init__(n_nonzero_coefs=n_nonzero_coefs)
+        self.model = OrthogonalMatchingPursuit(n_nonzero_coefs=n_nonzero_coefs)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvNonlinearRegression(BaseAlgorithm):
+    """Nonlinear regression via Gaussian Process with RBF kernel."""
+    name        = "Env Nonlinear GP Regression"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "GP regression captures nonlinear environmental-speed relationships"
+
+    def __init__(self):
+        super().__init__()
+        kernel = RBF(length_scale=1.0) + WhiteKernel(noise_level=0.1)
+        self.model = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=2)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)[:200, :4]  # subsample for speed
+        self.model.fit(E, X[:200, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)[:, :4]
+        return self.model.predict(E).astype(float)
+
+
+@registry.register
+class EnvMixedEffectsProxy(BaseAlgorithm):
+    """Mixed effects proxy: per-cluster intercept + environmental slope."""
+    name        = "Env Mixed Effects Proxy"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Group-level intercepts (land cover) + fixed environmental slopes"
+
+    def __init__(self, n_groups: int = 4):
+        super().__init__(n_groups=n_groups)
+        self.n_groups = n_groups
+        self.models = {}
+        self.km = KMeans(n_clusters=n_groups, random_state=42, n_init=5)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        groups = self.km.fit_predict(E)
+        for g in range(self.n_groups):
+            idx = groups == g
+            if idx.sum() > 5:
+                m = Ridge(alpha=1.0)
+                m.fit(E[idx], X[idx, 0])
+                self.models[g] = m
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        groups = self.km.predict(E)
+        out = np.zeros(len(X))
+        for g, m in self.models.items():
+            idx = groups == g
+            if idx.sum() > 0:
+                out[idx] = m.predict(E[idx])
+        return out.astype(float)
+
+
+@registry.register
+class EnvRobustRegression(BaseAlgorithm):
+    """Robust regression using minimum covariance determinant outlier trim."""
+    name        = "Env Robust Regression (MCD)"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "MCD-based outlier removal then linear regression on environment"
+
+    def __init__(self):
+        super().__init__()
+        self.model = LinearRegression()
+        self.mcd = None
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        try:
+            mcd = MinCovDet(random_state=42).fit(E)
+            distances = mcd.mahalanobis(E)
+            threshold = np.percentile(distances, 90)
+            mask = distances < threshold
+            self.model.fit(E[mask], X[mask, 0])
+        except Exception:
+            self.model.fit(E, X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvPassiveAggressiveRegressor(BaseAlgorithm):
+    """Passive Aggressive regressor — adaptive online environmental learning."""
+    name        = "Env Passive Aggressive Regressor"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Online PA regression adapts to shifting environmental conditions"
+
+    def __init__(self, C: float = 1.0):
+        super().__init__(C=C)
+        self.model = PassiveAggressiveRegressor(C=C, max_iter=300)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvStepwiseRegression(BaseAlgorithm):
+    """Stepwise-style regression via iterative feature importance pruning."""
+    name        = "Env Stepwise Regression"
+    service_id  = 3
+    category    = "statistical"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Forward selection of significant environmental predictors"
+
+    def __init__(self, max_features: int = 6):
+        super().__init__(max_features=max_features)
+        self.max_features = max_features
+        self.selected = None
+        self.model = LinearRegression()
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        n_feat = E.shape[1]
+        selected = []
+        remaining = list(range(n_feat))
+        for _ in range(min(self.max_features, n_feat)):
+            best_score = -np.inf
+            best_f = None
+            for f in remaining:
+                cols = selected + [f]
+                m = LinearRegression()
+                m.fit(E[:, cols], X[:, 0])
+                score = r2_score(X[:, 0], m.predict(E[:, cols]))
+                if score > best_score:
+                    best_score = score
+                    best_f = f
+            if best_f is not None:
+                selected.append(best_f)
+                remaining.remove(best_f)
+        self.selected = selected
+        self.model.fit(E[:, self.selected], X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        return self.model.predict(E[:, self.selected]).astype(float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORY 2 — TIME SERIES & TEMPORAL PATTERNS  (algos 21–35)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class EnvARModel(BaseAlgorithm):
+    """Autoregressive model: past speeds predict current environmental state."""
+    name        = "Env AR Model"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "AR(p) model of speed as environmental-time proxy"
+
+    def __init__(self, p: int = 5):
+        super().__init__(p=p)
+        self.p = p
+        self.coefs_ = None
+        self.intercept_ = 0.0
+
+    def fit(self, X, y=None):
+        s = X[:, 0]
+        rows = np.array([s[i:i + self.p] for i in range(len(s) - self.p)])
+        targets = s[self.p:]
+        m = LinearRegression()
+        m.fit(rows, targets)
+        self.coefs_ = m.coef_
+        self.intercept_ = m.intercept_
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = X[:, 0]
+        out = np.full(len(s), np.mean(s))
+        for i in range(self.p, len(s)):
+            window = s[i - self.p: i]
+            out[i] = np.dot(self.coefs_, window) + self.intercept_
+        return out.astype(float)
+
+
+@registry.register
+class EnvMovingAverage(BaseAlgorithm):
+    """Moving average smoother for environmental influence detection."""
+    name        = "Env Moving Average"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Rolling mean isolates smooth environmental signal from noise"
+
+    def __init__(self, window: int = 10):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = X[:, 0]
+        return np.convolve(s, np.ones(self.window) / self.window, mode="same").astype(float)
+
+
+@registry.register
+class EnvExponentialSmoothing(BaseAlgorithm):
+    """Exponential smoothing — downweights distant environmental history."""
+    name        = "Env Exponential Smoothing"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "EWMA of altitude as temperature/pressure proxy over time"
+
+    def __init__(self, alpha: float = 0.2):
+        super().__init__(alpha=alpha)
+        self.alpha = alpha
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = X[:, 1]  # altitude
+        out = np.zeros(len(s))
+        out[0] = s[0]
+        for i in range(1, len(s)):
+            out[i] = self.alpha * s[i] + (1 - self.alpha) * out[i - 1]
+        return out.astype(float)
+
+
+@registry.register
+class EnvKalmanFilter(BaseAlgorithm):
+    """Kalman filter — optimal state estimation of environmental trajectory."""
+    name        = "Env Kalman Filter"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "1D Kalman filter smoothing altitude/temperature state"
+
+    def __init__(self, process_noise: float = 1e-3, obs_noise: float = 0.1):
+        super().__init__(process_noise=process_noise, obs_noise=obs_noise)
+        self.Q = process_noise
+        self.R = obs_noise
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        z = X[:, 1]  # altitude
+        n = len(z)
+        x_est = np.zeros(n)
+        P = 1.0
+        x_est[0] = z[0]
+        for i in range(1, n):
+            x_pred = x_est[i - 1]
+            P_pred = P + self.Q
+            K = P_pred / (P_pred + self.R)
+            x_est[i] = x_pred + K * (z[i] - x_pred)
+            P = (1 - K) * P_pred
+        return x_est.astype(float)
+
+
+@registry.register
+class EnvHMMEnvironmental(BaseAlgorithm):
+    """HMM over environmental bins — infers latent habitat states."""
+    name        = "Env Hidden Markov Model"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "2-state HMM over altitude bins: low vs high environment"
+
+    def __init__(self, n_states: int = 2):
+        super().__init__(n_states=n_states)
+        self.n_states = n_states
+        self.means_ = None
+
+    def fit(self, X, y=None):
+        alt = X[:, 1]
+        percentiles = np.linspace(0, 100, self.n_states + 1)
+        self.boundaries = np.percentile(alt, percentiles)
+        self.means_ = np.array([
+            np.mean(alt[(alt >= self.boundaries[i]) & (alt < self.boundaries[i + 1])])
+            for i in range(self.n_states)
+        ])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        alt = X[:, 1]
+        states = np.zeros(len(alt), dtype=int)
+        for i in range(self.n_states):
+            mask = (alt >= self.boundaries[i]) & (alt < self.boundaries[i + 1])
+            states[mask] = i
+        return states.astype(float)
+
+
+@registry.register
+class EnvCrossCorrelation(BaseAlgorithm):
+    """Cross-correlation: lag between altitude and speed responses."""
+    name        = "Env Cross Correlation"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Finds time lag between environmental change and speed response"
+
+    def __init__(self, max_lag: int = 20):
+        super().__init__(max_lag=max_lag)
+        self.max_lag = max_lag
+        self.lag_ = 0
+
+    def fit(self, X, y=None):
+        speed = X[:, 0] - X[:, 0].mean()
+        alt   = X[:, 1] - X[:, 1].mean()
+        xcorr = np.correlate(speed, alt, mode="full")
+        lags  = np.arange(-len(speed) + 1, len(speed))
+        mask  = np.abs(lags) <= self.max_lag
+        self.lag_ = lags[mask][np.argmax(np.abs(xcorr[mask]))]
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        shift = int(self.lag_)
+        shifted = np.roll(X[:, 1], -shift)
+        return shifted.astype(float)
+
+
+@registry.register
+class EnvSeasonalDecomposition(BaseAlgorithm):
+    """Seasonal decomposition: extract daily/periodic environmental signal."""
+    name        = "Env Seasonal Decomposition"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Decomposes movement speed into trend + seasonal + residual"
+
+    def __init__(self, period: int = 48):
+        super().__init__(period=period)
+        self.period = period
+        self.seasonal_ = None
+
+    def fit(self, X, y=None):
+        s = X[:, 0]
+        n = len(s)
+        trend = np.convolve(s, np.ones(self.period) / self.period, mode="same")
+        detrended = s - trend
+        self.seasonal_ = np.array([
+            np.mean(detrended[i::self.period]) for i in range(self.period)
+        ])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        n = len(X)
+        seasonal = np.array([self.seasonal_[i % self.period] for i in range(n)])
+        return seasonal.astype(float)
+
+
+@registry.register
+class EnvFourierTransform(BaseAlgorithm):
+    """Fourier transform: frequency content of environmental influence."""
+    name        = "Env Fourier Transform"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "FFT extracts dominant frequencies in altitude-speed coupling"
+
+    def __init__(self, n_harmonics: int = 5):
+        super().__init__(n_harmonics=n_harmonics)
+        self.n_harmonics = n_harmonics
+        self.freqs_ = None
+        self.amps_  = None
+
+    def fit(self, X, y=None):
+        s = X[:, 0]
+        fft = np.fft.rfft(s)
+        self.amps_  = np.abs(fft)
+        self.freqs_ = np.fft.rfftfreq(len(s))
+        top_idx = np.argsort(self.amps_)[-self.n_harmonics:]
+        mask = np.zeros_like(fft)
+        mask[top_idx] = fft[top_idx]
+        self.filtered_ = np.fft.irfft(mask, n=len(s))
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        # Return the harmonic reconstruction
+        if len(X) == len(self.filtered_):
+            return self.filtered_.astype(float)
+        s = X[:, 0]
+        fft = np.fft.rfft(s)
+        amps = np.abs(fft)
+        top_idx = np.argsort(amps)[-self.n_harmonics:]
+        mask = np.zeros_like(fft)
+        mask[top_idx] = fft[top_idx]
+        return np.fft.irfft(mask, n=len(s)).astype(float)
+
+
+@registry.register
+class EnvWaveletTransform(BaseAlgorithm):
+    """Wavelet-based multi-scale environmental analysis."""
+    name        = "Env Wavelet Analysis"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Multi-resolution decomposition of environmental-movement signal"
+
+    def __init__(self, level: int = 3):
+        super().__init__(level=level)
+        self.level = level
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = X[:, 0].copy()
+        result = np.zeros_like(s)
+        # Haar DWT approximation
+        for _ in range(self.level):
+            n = len(s) // 2 * 2
+            approx = (s[:n:2] + s[1:n:2]) / np.sqrt(2)
+            detail = (s[:n:2] - s[1:n:2]) / np.sqrt(2)
+            result[:len(approx)] += approx
+            s = approx
+        return result[:len(X)].astype(float)
+
+
+@registry.register
+class EnvGrangerCausality(BaseAlgorithm):
+    """Granger causality proxy: does altitude predict future speed?"""
+    name        = "Env Granger Causality Proxy"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Granger-style test: altitude lag improves speed prediction"
+
+    def __init__(self, lag: int = 5):
+        super().__init__(lag=lag)
+        self.lag = lag
+        self.model_full = LinearRegression()
+        self.model_restricted = LinearRegression()
+
+    def fit(self, X, y=None):
+        n = len(X)
+        speed = X[:, 0]
+        alt   = X[:, 1]
+        # Restricted: speed only
+        Xr = np.column_stack([speed[i:n - self.lag + i] for i in range(self.lag)])
+        yr = speed[self.lag:]
+        self.model_restricted.fit(Xr, yr)
+        # Full: speed + lagged altitude
+        Xf = np.column_stack([
+            speed[i:n - self.lag + i] for i in range(self.lag)
+        ] + [alt[i:n - self.lag + i] for i in range(self.lag)])
+        self.model_full.fit(Xf, yr)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        n = len(X)
+        speed = X[:, 0]
+        alt   = X[:, 1]
+        out = np.zeros(n)
+        Xf = np.column_stack([
+            speed[i:n - self.lag + i] for i in range(self.lag)
+        ] + [alt[i:n - self.lag + i] for i in range(self.lag)])
+        out[self.lag:] = self.model_full.predict(Xf)
+        return out.astype(float)
+
+
+@registry.register
+class EnvDTWAlignment(BaseAlgorithm):
+    """DTW-based environmental profile matching across animal tracks."""
+    name        = "Env DTW Alignment"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Dynamic time warping aligns altitude profiles for comparison"
+
+    def __init__(self):
+        super().__init__()
+        self.reference_ = None
+
+    def fit(self, X, y=None):
+        self.reference_ = X[:, 1].copy()  # altitude reference
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        query = X[:, 1]
+        ref = self.reference_
+        n, m = len(query), len(ref)
+        # Compute DTW cost matrix
+        D = np.full((n + 1, m + 1), np.inf)
+        D[0, 0] = 0
+        for i in range(1, n + 1):
+            for j in range(max(1, i - 5), min(m + 1, i + 5)):
+                cost = abs(query[i - 1] - ref[j - 1])
+                D[i, j] = cost + min(D[i-1, j], D[i, j-1], D[i-1, j-1])
+        # Return similarity score per point (approximation)
+        sim = np.abs(query - np.interp(
+            np.linspace(0, 1, n),
+            np.linspace(0, 1, m),
+            ref
+        ))
+        return sim.astype(float)
+
+
+@registry.register
+class EnvAutocorrelation(BaseAlgorithm):
+    """Autocorrelation analysis of environmental time series."""
+    name        = "Env Autocorrelation Analysis"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "ACF of altitude series reveals environmental persistence"
+
+    def __init__(self, max_lag: int = 30):
+        super().__init__(max_lag=max_lag)
+        self.max_lag = max_lag
+        self.acf_ = None
+
+    def fit(self, X, y=None):
+        s = X[:, 1] - X[:, 1].mean()
+        var = np.var(s)
+        self.acf_ = np.array([np.mean(s[i:] * s[:len(s) - i]) / (var + 1e-9)
+                               for i in range(self.max_lag + 1)])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = X[:, 1]
+        n = len(s)
+        lag = int(np.argmax(np.abs(self.acf_[1:])) + 1)
+        lag = min(lag, n - 1)
+        return np.roll(s, lag).astype(float)
+
+
+@registry.register
+class EnvStateSpaceModel(BaseAlgorithm):
+    """Simple state-space model: hidden environmental state drives speed."""
+    name        = "Env State Space Model"
+    service_id  = 3
+    category    = "time_series"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Linear Gaussian state-space model for environmental state"
+
+    def __init__(self, process_var: float = 0.5, obs_var: float = 1.0):
+        super().__init__(process_var=process_var, obs_var=obs_var)
+        self.Q = process_var
+        self.R = obs_var
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        obs = X[:, 0]
+        n = len(obs)
+        state = np.zeros(n)
+        state[0] = obs[0]
+        P = 1.0
+        for i in range(1, n):
+            P_pred = P + self.Q
+            K = P_pred / (P_pred + self.R)
+            state[i] = state[i - 1] + K * (obs[i] - state[i - 1])
+            P = (1 - K) * P_pred
+        return state.astype(float)
+
+
+@registry.register
+class EnvSavitzkyGolayFilter(BaseAlgorithm):
+    """Savitzky-Golay smoothing — preserves environmental extremes."""
+    name        = "Env Savitzky-Golay Filter"
+    service_id  = 3
+    category    = "time_series"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Polynomial smoothing of altitude signal preserving peaks"
+
+    def __init__(self, window_length: int = 11, polyorder: int = 3):
+        super().__init__(window_length=window_length, polyorder=polyorder)
+        self.window_length = window_length
+        self.polyorder = polyorder
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = X[:, 1]
+        wl = min(self.window_length, len(s) if len(s) % 2 == 1 else len(s) - 1)
+        wl = max(wl, self.polyorder + 2)
+        if wl % 2 == 0:
+            wl -= 1
+        return savgol_filter(s, window_length=wl, polyorder=self.polyorder).astype(float)
+
+
+@registry.register
+class EnvPeriodogramAnalysis(BaseAlgorithm):
+    """Periodogram: dominant environmental cycles in movement data."""
+    name        = "Env Periodogram Analysis"
+    service_id  = 3
+    category    = "time_series"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "Power spectral density of altitude for cycle detection"
+
+    def __init__(self):
+        super().__init__()
+        self.dominant_freq_ = None
+
+    def fit(self, X, y=None):
+        f, Pxx = periodogram(X[:, 1])
+        self.dominant_freq_ = f[np.argmax(Pxx[1:]) + 1]
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        n = len(X)
+        t = np.arange(n)
+        return np.sin(2 * np.pi * self.dominant_freq_ * t).astype(float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORY 3 — MACHINE LEARNING SUPERVISED  (algos 36–53)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class EnvRandomForestRegressor(BaseAlgorithm):
+    """Random Forest regression: nonlinear env-movement relationship."""
+    name        = "Env Random Forest Regressor"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "RF regression: environmental features predict movement speed"
+
+    def __init__(self, n_estimators: int = 100):
+        super().__init__(n_estimators=n_estimators)
+        self.model = RandomForestRegressor(n_estimators=n_estimators, random_state=42, n_jobs=-1)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvRandomForestClassifier(BaseAlgorithm):
+    """Random Forest: classify habitat zone from movement+environment."""
+    name        = "Env Random Forest Classifier"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "RF classifies high/med/low altitude habitat from movement"
+
+    def __init__(self, n_estimators: int = 100):
+        super().__init__(n_estimators=n_estimators)
+        self.model = RandomForestClassifier(n_estimators=n_estimators, random_state=42, n_jobs=-1)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        labels = np.digitize(X[:, 1], np.percentile(X[:, 1], [33, 66])).astype(int)
+        self.model.fit(E, labels)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvGradientBoostingRegressor(BaseAlgorithm):
+    """GBM regression for complex environmental response surfaces."""
+    name        = "Env Gradient Boosting Regressor"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Sequential boosting captures complex env-speed interactions"
+
+    def __init__(self, n_estimators: int = 100, max_depth: int = 3):
+        super().__init__(n_estimators=n_estimators, max_depth=max_depth)
+        self.model = GradientBoostingRegressor(n_estimators=n_estimators, max_depth=max_depth)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvXGBoostRegressor(BaseAlgorithm):
+    """XGBoost for high-accuracy environmental factor modelling."""
+    name        = "Env XGBoost Regressor"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "xgboost"
+    animals     = ["all"]
+    description = "XGBoost gradient boosting on environmental features"
+
+    def __init__(self, n_estimators: int = 100, max_depth: int = 4):
+        super().__init__(n_estimators=n_estimators, max_depth=max_depth)
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+
+    def fit(self, X, y=None):
+        if _HAS_XGB:
+            self.model = XGBRegressor(n_estimators=self.n_estimators,
+                                      max_depth=self.max_depth,
+                                      verbosity=0, random_state=42)
+            self.model.fit(_env_features(X), X[:, 0])
+        else:
+            self.model = GradientBoostingRegressor(n_estimators=self.n_estimators)
+            self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvLightGBMRegressor(BaseAlgorithm):
+    """LightGBM fast gradient boosting for large Movebank datasets."""
+    name        = "Env LightGBM Regressor"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "lightgbm"
+    animals     = ["all"]
+    description = "LightGBM leaf-wise boosting for environmental prediction"
+
+    def __init__(self, n_estimators: int = 100):
+        super().__init__(n_estimators=n_estimators)
+        self.n_estimators = n_estimators
+
+    def fit(self, X, y=None):
+        if _HAS_LGB:
+            self.model = LGBMRegressor(n_estimators=self.n_estimators,
+                                       verbose=-1, random_state=42)
+        else:
+            self.model = GradientBoostingRegressor(n_estimators=self.n_estimators)
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvCatBoostRegressor(BaseAlgorithm):
+    """CatBoost: handles categorical land-cover features natively."""
+    name        = "Env CatBoost Regressor"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "catboost"
+    animals     = ["all"]
+    description = "CatBoost with native categorical land-cover handling"
+
+    def __init__(self, iterations: int = 100):
+        super().__init__(iterations=iterations)
+        self.iterations = iterations
+
+    def fit(self, X, y=None):
+        if _HAS_CAT:
+            self.model = CatBoostRegressor(iterations=self.iterations,
+                                           verbose=0, random_state=42)
+        else:
+            self.model = GradientBoostingRegressor(n_estimators=self.iterations)
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvSVR(BaseAlgorithm):
+    """Support Vector Regression with RBF kernel for nonlinear env response."""
+    name        = "Env SVR"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "SVR with RBF kernel for nonlinear env-movement mapping"
+
+    def __init__(self, C: float = 1.0, epsilon: float = 0.1):
+        super().__init__(C=C, epsilon=epsilon)
+        self.model = SVR(C=C, epsilon=epsilon, kernel="rbf")
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvKNNRegressor(BaseAlgorithm):
+    """k-NN regression: environmentally similar points have similar speed."""
+    name        = "Env KNN Regressor"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "k-nearest-neighbour regression on environmental feature space"
+
+    def __init__(self, n_neighbors: int = 7):
+        super().__init__(n_neighbors=n_neighbors)
+        self.model = KNeighborsRegressor(n_neighbors=n_neighbors)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvDecisionTree(BaseAlgorithm):
+    """Decision tree regression — interpretable habitat-speed rules."""
+    name        = "Env Decision Tree Regressor"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Decision tree extracts simple env threshold rules for speed"
+
+    def __init__(self, max_depth: int = 5):
+        super().__init__(max_depth=max_depth)
+        self.model = DecisionTreeRegressor(max_depth=max_depth, random_state=42)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvExtraTreesRegressor(BaseAlgorithm):
+    """Extra Randomised Trees: fast ensemble for environmental modelling."""
+    name        = "Env Extra Trees Regressor"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Extremely randomised trees regression on environmental features"
+
+    def __init__(self, n_estimators: int = 100):
+        super().__init__(n_estimators=n_estimators)
+        self.model = ExtraTreesRegressor(n_estimators=n_estimators, random_state=42, n_jobs=-1)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvAdaBoostRegressor(BaseAlgorithm):
+    """AdaBoost regression focusing on hard environmental cases."""
+    name        = "Env AdaBoost Regressor"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "AdaBoost emphasises difficult environmental transition points"
+
+    def __init__(self, n_estimators: int = 50):
+        super().__init__(n_estimators=n_estimators)
+        self.model = AdaBoostRegressor(n_estimators=n_estimators, random_state=42)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvGaussianProcessEnv(BaseAlgorithm):
+    """GP with Matern kernel for smooth environmental response curves."""
+    name        = "Env Gaussian Process (Matern)"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "GP Matern kernel models spatial environmental smoothness"
+
+    def __init__(self):
+        super().__init__()
+        kernel = Matern(length_scale=1.0, nu=1.5)
+        self.model = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=0)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)[:150, :4]
+        self.model.fit(E, X[:150, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)[:, :4]).astype(float)
+
+
+@registry.register
+class EnvNaiveBayesEnv(BaseAlgorithm):
+    """Naive Bayes: probabilistic habitat-class from env features."""
+    name        = "Env Naive Bayes Habitat"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Gaussian NB classifies habitat zone from environmental proxies"
+
+    def __init__(self):
+        super().__init__()
+        self.model = GaussianNB()
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        labels = np.digitize(X[:, 1], np.percentile(X[:, 1], [33, 66])).astype(int)
+        self.model.fit(E, labels)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvLDA(BaseAlgorithm):
+    """LDA: discriminate habitat classes using environmental features."""
+    name        = "Env Linear Discriminant Analysis"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "LDA maximally separates habitat classes using env features"
+
+    def __init__(self):
+        super().__init__()
+        self.model = LinearDiscriminantAnalysis()
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        labels = np.digitize(X[:, 1], np.percentile(X[:, 1], [33, 66])).astype(int)
+        self.model.fit(E, labels)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvQDA(BaseAlgorithm):
+    """QDA: quadratic boundaries for nonlinear habitat discrimination."""
+    name        = "Env Quadratic Discriminant Analysis"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "QDA with class-specific covariance for habitat separation"
+
+    def __init__(self):
+        super().__init__()
+        self.model = QuadraticDiscriminantAnalysis(reg_param=0.1)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        labels = np.digitize(X[:, 1], np.percentile(X[:, 1], [33, 66])).astype(int)
+        self.model.fit(E, labels)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvBaggingRegressor(BaseAlgorithm):
+    """Bagging ensemble of decision trees for stable environmental prediction."""
+    name        = "Env Bagging Regressor"
+    service_id  = 3
+    category    = "ml_supervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Bagged decision trees reduce variance in env-speed modelling"
+
+    def __init__(self, n_estimators: int = 20):
+        super().__init__(n_estimators=n_estimators)
+        self.model = BaggingRegressor(
+            estimator=DecisionTreeRegressor(max_depth=4),
+            n_estimators=n_estimators, random_state=42
+        )
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORY 4 — DEEP LEARNING  (algos 54–63)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class EnvMLPRegressor(BaseAlgorithm):
+    """Multi-layer perceptron for complex environmental-movement mapping."""
+    name        = "Env MLP Regressor"
+    service_id  = 3
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "2-layer neural network: env features → movement speed"
+
+    def __init__(self, hidden: int = 64, lr: float = 0.01, epochs: int = 200):
+        super().__init__(hidden=hidden, lr=lr, epochs=epochs)
+        self.hidden = hidden
+        self.lr = lr
+        self.epochs = epochs
+
+    def _relu(self, x):
+        return np.maximum(0, x)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        n_in = E.shape[1]
+        self.W1 = np.random.randn(n_in, self.hidden) * 0.1
+        self.b1 = np.zeros(self.hidden)
+        self.W2 = np.random.randn(self.hidden, 1) * 0.1
+        self.b2 = np.zeros(1)
+        target = X[:, 0:1]
+        for _ in range(self.epochs):
+            h = self._relu(E @ self.W1 + self.b1)
+            pred = h @ self.W2 + self.b2
+            err = pred - target
+            dW2 = h.T @ err / len(E)
+            db2 = err.mean(axis=0)
+            dh = (err @ self.W2.T) * (h > 0)
+            dW1 = E.T @ dh / len(E)
+            db1 = dh.mean(axis=0)
+            self.W1 -= self.lr * dW1
+            self.b1 -= self.lr * db1
+            self.W2 -= self.lr * dW2
+            self.b2 -= self.lr * db2
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        h = self._relu(E @ self.W1 + self.b1)
+        return (h @ self.W2 + self.b2).ravel().astype(float)
+
+
+@registry.register
+class EnvRNNRegressor(BaseAlgorithm):
+    """Vanilla RNN — temporal environmental sequence modelling."""
+    name        = "Env Vanilla RNN"
+    service_id  = 3
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Simple RNN processes sequential environmental states"
+
+    def __init__(self, hidden: int = 16, lr: float = 0.005, epochs: int = 50):
+        super().__init__(hidden=hidden, lr=lr, epochs=epochs)
+        self.hidden = hidden
+        self.lr = lr
+        self.epochs = epochs
+
+    def fit(self, X, y=None):
+        n_in = 2  # speed, altitude
+        h = self.hidden
+        self.Wx = np.random.randn(n_in, h) * 0.1
+        self.Wh = np.random.randn(h, h) * 0.1
+        self.Wy = np.random.randn(h, 1) * 0.1
+        self.bh = np.zeros(h)
+        self.by = np.zeros(1)
+        seq = X[:, :2]
+        for _ in range(self.epochs):
+            ht = np.zeros(h)
+            preds, hs = [], []
+            for t in range(len(seq)):
+                ht = np.tanh(seq[t] @ self.Wx + ht @ self.Wh + self.bh)
+                hs.append(ht.copy())
+                preds.append(ht @ self.Wy + self.by)
+            preds = np.array(preds).squeeze()
+            err = preds - X[:, 0]
+            # Simplified BPTT (last step only for speed)
+            dWy = np.outer(hs[-1], err[-1:])
+            self.Wy -= self.lr * dWy
+            self.by -= self.lr * err.mean()
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        seq = X[:, :2]
+        ht = np.zeros(self.hidden)
+        out = []
+        for t in range(len(seq)):
+            ht = np.tanh(seq[t] @ self.Wx + ht @ self.Wh + self.bh)
+            out.append((ht @ self.Wy + self.by).item())
+        return np.array(out).astype(float)
+
+
+@registry.register
+class EnvLSTMRegressor(BaseAlgorithm):
+    """LSTM for long-range environmental memory in movement sequences."""
+    name        = "Env LSTM Regressor"
+    service_id  = 3
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "LSTM captures multi-day environmental effects on movement"
+
+    def __init__(self, hidden: int = 16, epochs: int = 30, lr: float = 0.01):
+        super().__init__(hidden=hidden, epochs=epochs, lr=lr)
+        self.hidden = hidden
+        self.epochs = epochs
+        self.lr = lr
+
+    def _sigmoid(self, x):
+        return 1 / (1 + np.exp(-np.clip(x, -10, 10)))
+
+    def fit(self, X, y=None):
+        n_in, h = 2, self.hidden
+        scale = 0.1
+        self.Wf = np.random.randn(n_in + h, h) * scale
+        self.Wi = np.random.randn(n_in + h, h) * scale
+        self.Wc = np.random.randn(n_in + h, h) * scale
+        self.Wo = np.random.randn(n_in + h, h) * scale
+        self.bf = np.zeros(h)
+        self.bi = np.zeros(h)
+        self.bc = np.zeros(h)
+        self.bo = np.zeros(h)
+        self.Wy = np.random.randn(h, 1) * scale
+        self.by = np.zeros(1)
+        for _ in range(self.epochs):
+            ht = np.zeros(h)
+            ct = np.zeros(h)
+            preds = []
+            for t in range(len(X)):
+                xt = X[t, :2]
+                combined = np.concatenate([xt, ht])
+                f = self._sigmoid(combined @ self.Wf + self.bf)
+                i = self._sigmoid(combined @ self.Wi + self.bi)
+                c_tilde = np.tanh(combined @ self.Wc + self.bc)
+                ct = f * ct + i * c_tilde
+                o = self._sigmoid(combined @ self.Wo + self.bo)
+                ht = o * np.tanh(ct)
+                preds.append((ht @ self.Wy + self.by).item())
+            err = np.array(preds) - X[:, 0]
+            self.Wy -= self.lr * np.outer(ht, [err.mean()])
+            self.by -= self.lr * err.mean()
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        ht, ct = np.zeros(self.hidden), np.zeros(self.hidden)
+        out = []
+        for t in range(len(X)):
+            xt = X[t, :2]
+            combined = np.concatenate([xt, ht])
+            f = self._sigmoid(combined @ self.Wf + self.bf)
+            i = self._sigmoid(combined @ self.Wi + self.bi)
+            c_tilde = np.tanh(combined @ self.Wc + self.bc)
+            ct = f * ct + i * c_tilde
+            o = self._sigmoid(combined @ self.Wo + self.bo)
+            ht = o * np.tanh(ct)
+            out.append((ht @ self.Wy + self.by).item())
+        return np.array(out).astype(float)
+
+
+@registry.register
+class EnvGRURegressor(BaseAlgorithm):
+    """GRU — efficient gated recurrent unit for environmental sequences."""
+    name        = "Env GRU Regressor"
+    service_id  = 3
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "GRU with update/reset gates for environmental sequence learning"
+
+    def __init__(self, hidden: int = 16, epochs: int = 30, lr: float = 0.01):
+        super().__init__(hidden=hidden, epochs=epochs, lr=lr)
+        self.hidden = hidden
+        self.epochs = epochs
+        self.lr = lr
+
+    def _sigmoid(self, x):
+        return 1 / (1 + np.exp(-np.clip(x, -10, 10)))
+
+    def fit(self, X, y=None):
+        n_in, h = 2, self.hidden
+        s = 0.1
+        self.Wz = np.random.randn(n_in + h, h) * s
+        self.Wr = np.random.randn(n_in + h, h) * s
+        self.Wn = np.random.randn(n_in + h, h) * s
+        self.bz = np.zeros(h); self.br = np.zeros(h); self.bn = np.zeros(h)
+        self.Wy = np.random.randn(h, 1) * s; self.by = np.zeros(1)
+        for _ in range(self.epochs):
+            ht = np.zeros(h)
+            preds = []
+            for t in range(len(X)):
+                xt = X[t, :2]
+                combined = np.concatenate([xt, ht])
+                z = self._sigmoid(combined @ self.Wz + self.bz)
+                r = self._sigmoid(combined @ self.Wr + self.br)
+                n = np.tanh(np.concatenate([xt, r * ht]) @ self.Wn + self.bn)
+                ht = (1 - z) * n + z * ht
+                preds.append((ht @ self.Wy + self.by).item())
+            err = np.array(preds) - X[:, 0]
+            self.Wy -= self.lr * np.outer(ht, [err.mean()])
+            self.by -= self.lr * err.mean()
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        ht = np.zeros(self.hidden)
+        out = []
+        for t in range(len(X)):
+            xt = X[t, :2]
+            combined = np.concatenate([xt, ht])
+            z = self._sigmoid(combined @ self.Wz + self.bz)
+            r = self._sigmoid(combined @ self.Wr + self.br)
+            n = np.tanh(np.concatenate([xt, r * ht]) @ self.Wn + self.bn)
+            ht = (1 - z) * n + z * ht
+            out.append((ht @ self.Wy + self.by).item())
+        return np.array(out).astype(float)
+
+
+@registry.register
+class EnvAutoencoderEnv(BaseAlgorithm):
+    """Autoencoder: compresses environmental features to latent code."""
+    name        = "Env Autoencoder"
+    service_id  = 3
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Autoencoder learns compact environmental state representation"
+
+    def __init__(self, latent_dim: int = 3, epochs: int = 100, lr: float = 0.01):
+        super().__init__(latent_dim=latent_dim, epochs=epochs, lr=lr)
+        self.latent_dim = latent_dim
+        self.epochs = epochs
+        self.lr = lr
+
+    def _relu(self, x): return np.maximum(0, x)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        n_in = E.shape[1]
+        self.We = np.random.randn(n_in, self.latent_dim) * 0.1
+        self.be = np.zeros(self.latent_dim)
+        self.Wd = np.random.randn(self.latent_dim, n_in) * 0.1
+        self.bd = np.zeros(n_in)
+        for _ in range(self.epochs):
+            z = self._relu(E @ self.We + self.be)
+            recon = z @ self.Wd + self.bd
+            err = recon - E
+            dWd = z.T @ err / len(E)
+            dz = err @ self.Wd.T * (z > 0)
+            dWe = E.T @ dz / len(E)
+            self.We -= self.lr * dWe
+            self.Wd -= self.lr * dWd
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        z = self._relu(E @ self.We + self.be)
+        return z[:, 0].astype(float)
+
+
+@registry.register
+class EnvCNN1D(BaseAlgorithm):
+    """1D CNN over sliding windows of environmental signal."""
+    name        = "Env 1D CNN"
+    service_id  = 3
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Convolutional feature extraction from environmental time windows"
+
+    def __init__(self, kernel_size: int = 5, n_filters: int = 8, epochs: int = 30):
+        super().__init__(kernel_size=kernel_size, n_filters=n_filters, epochs=epochs)
+        self.kernel_size = kernel_size
+        self.n_filters = n_filters
+        self.epochs = epochs
+
+    def _relu(self, x): return np.maximum(0, x)
+
+    def _conv1d(self, x, kernel):
+        n = len(x) - len(kernel) + 1
+        return np.array([np.dot(x[i:i + len(kernel)], kernel) for i in range(n)])
+
+    def fit(self, X, y=None):
+        self.kernels = np.random.randn(self.n_filters, self.kernel_size) * 0.1
+        self.W_out = np.random.randn(self.n_filters, 1) * 0.1
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = X[:, 1]  # altitude
+        maps = np.column_stack([
+            np.pad(self._relu(self._conv1d(s, k)), (0, self.kernel_size - 1), "edge")
+            for k in self.kernels
+        ])
+        return (maps @ self.W_out).ravel().astype(float)
+
+
+@registry.register
+class EnvTemporalCNN(BaseAlgorithm):
+    """Temporal CNN with dilated convolutions for multi-scale env patterns."""
+    name        = "Env Temporal CNN (Dilated)"
+    service_id  = 3
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Dilated causal convolution captures multi-scale environmental cycles"
+
+    def __init__(self, kernel_size: int = 3, dilation: int = 2):
+        super().__init__(kernel_size=kernel_size, dilation=dilation)
+        self.kernel_size = kernel_size
+        self.dilation = dilation
+
+    def fit(self, X, y=None):
+        self.kernels = [np.random.randn(self.kernel_size) * 0.1 for _ in range(3)]
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = X[:, 1].copy()
+        for k in self.kernels:
+            d = self.dilation
+            dilated = np.array([s[max(0, i - d * j)] for i in range(len(s))
+                                for j in range(self.kernel_size)]).reshape(len(s), -1)
+            s = np.maximum(0, dilated @ k[:dilated.shape[1]])
+        return s.astype(float)
+
+
+@registry.register
+class EnvAttentionMechanism(BaseAlgorithm):
+    """Self-attention to weight environmental time steps by relevance."""
+    name        = "Env Self-Attention"
+    service_id  = 3
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Scaled dot-product attention over environmental feature sequence"
+
+    def __init__(self, d_model: int = 8):
+        super().__init__(d_model=d_model)
+        self.d_model = d_model
+
+    def fit(self, X, y=None):
+        n_in = 2
+        self.Wq = np.random.randn(n_in, self.d_model) * 0.1
+        self.Wk = np.random.randn(n_in, self.d_model) * 0.1
+        self.Wv = np.random.randn(n_in, self.d_model) * 0.1
+        self.Wo = np.random.randn(self.d_model, 1) * 0.1
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        seq = X[:, :2]
+        Q = seq @ self.Wq
+        K = seq @ self.Wk
+        V = seq @ self.Wv
+        scores = Q @ K.T / np.sqrt(self.d_model)
+        weights = np.exp(scores - scores.max(axis=1, keepdims=True))
+        weights /= weights.sum(axis=1, keepdims=True)
+        attended = weights @ V
+        return (attended @ self.Wo).ravel().astype(float)
+
+
+@registry.register
+class EnvVariationalAutoencoder(BaseAlgorithm):
+    """VAE: learns probabilistic environmental latent space."""
+    name        = "Env Variational Autoencoder"
+    service_id  = 3
+    category    = "deep_learning"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "VAE encodes environmental variability as Gaussian latent code"
+
+    def __init__(self, latent_dim: int = 2, epochs: int = 50, lr: float = 0.01):
+        super().__init__(latent_dim=latent_dim, epochs=epochs, lr=lr)
+        self.latent_dim = latent_dim
+        self.epochs = epochs
+        self.lr = lr
+
+    def _relu(self, x): return np.maximum(0, x)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        n_in = E.shape[1]
+        self.We_mu  = np.random.randn(n_in, self.latent_dim) * 0.1
+        self.We_log = np.random.randn(n_in, self.latent_dim) * 0.1
+        self.Wd     = np.random.randn(self.latent_dim, n_in) * 0.1
+        for _ in range(self.epochs):
+            mu = self._relu(E @ self.We_mu)
+            log_var = self._relu(E @ self.We_log)
+            eps = np.random.randn(*mu.shape)
+            z = mu + eps * np.exp(0.5 * log_var)
+            recon = z @ self.Wd
+            recon_loss = np.mean((recon - E) ** 2)
+            kl_loss = -0.5 * np.mean(1 + log_var - mu ** 2 - np.exp(log_var))
+            grad = (recon - E) @ self.Wd.T / len(E)
+            self.We_mu  -= self.lr * E.T @ (grad * (mu > 0)) / len(E)
+            self.Wd     -= self.lr * z.T @ (recon - E) / len(E)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        mu = self._relu(E @ self.We_mu)
+        return mu[:, 0].astype(float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORY 5 — SPATIAL / GEOSTATISTICAL  (algos 64–75)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class EnvKernelDensityEstimation(BaseAlgorithm):
+    """KDE over environmental space — identifies habitat use intensity."""
+    name        = "Env Kernel Density Estimation"
+    service_id  = 3
+    category    = "spatial"
+    library     = "scipy"
+    animals     = ["all"]
+    description = "KDE in alt-speed space reveals environmental use intensity"
+
+    def __init__(self, bandwidth: float = 0.3):
+        super().__init__(bandwidth=bandwidth)
+        self.bandwidth = bandwidth
+        self.kde_ = None
+
+    def fit(self, X, y=None):
+        data = X[:, :2].T  # speed, altitude
+        self.kde_ = stats.gaussian_kde(data, bw_method=self.bandwidth)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.kde_(X[:, :2].T).astype(float)
+
+
+@registry.register
+class EnvSpatialAutocorrelationMoransI(BaseAlgorithm):
+    """Moran's I proxy: spatial autocorrelation of altitude zones."""
+    name        = "Env Moran's I Proxy"
+    service_id  = 3
+    category    = "spatial"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Local spatial autocorrelation of altitude for habitat clustering"
+
+    def __init__(self, window: int = 10):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.global_mean_ = X[:, 1].mean()
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        alt = X[:, 1]
+        n = len(alt)
+        w = self.window
+        z = alt - self.global_mean_
+        local_I = np.zeros(n)
+        for i in range(n):
+            j_start = max(0, i - w)
+            j_end   = min(n, i + w + 1)
+            neighbors = np.concatenate([z[j_start:i], z[i+1:j_end]])
+            if len(neighbors) > 0:
+                local_I[i] = z[i] * neighbors.mean()
+        return local_I.astype(float)
+
+
+@registry.register
+class EnvKriging(BaseAlgorithm):
+    """Ordinary Kriging proxy: spatial interpolation of environmental scores."""
+    name        = "Env Ordinary Kriging"
+    service_id  = 3
+    category    = "spatial"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Kriging-style GP spatial interpolation of altitude field"
+
+    def __init__(self):
+        super().__init__()
+        kernel = RBF(length_scale=1.0) + WhiteKernel(noise_level=0.01)
+        self.gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=0)
+
+    def fit(self, X, y=None):
+        # Use step index as 1D spatial coordinate
+        coords = np.arange(len(X)).reshape(-1, 1).astype(float) / len(X)
+        self.gp.fit(coords[:200], X[:200, 1])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        coords = np.arange(len(X)).reshape(-1, 1).astype(float) / len(X)
+        return self.gp.predict(coords).astype(float)
+
+
+@registry.register
+class EnvGeographicallyWeightedRegression(BaseAlgorithm):
+    """GWR proxy: spatially varying environmental coefficients."""
+    name        = "Env Geographically Weighted Regression"
+    service_id  = 3
+    category    = "spatial"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Local regression with Gaussian spatial weighting function"
+
+    def __init__(self, bandwidth: int = 50):
+        super().__init__(bandwidth=bandwidth)
+        self.bandwidth = bandwidth
+        self.local_means_ = None
+
+    def fit(self, X, y=None):
+        n = len(X)
+        self.local_preds_ = np.zeros(n)
+        E = _env_features(X)
+        speed = X[:, 0]
+        positions = np.arange(n)
+        for i in range(n):
+            w = np.exp(-0.5 * ((positions - i) / self.bandwidth) ** 2)
+            wsum = w.sum()
+            if wsum > 1e-9:
+                self.local_preds_[i] = np.sum(w * speed) / wsum
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        n = len(X)
+        preds = np.zeros(n)
+        speed = X[:, 0]
+        positions = np.arange(n)
+        for i in range(n):
+            w = np.exp(-0.5 * ((positions - i) / self.bandwidth) ** 2)
+            wsum = w.sum()
+            preds[i] = np.sum(w * speed) / wsum if wsum > 1e-9 else speed[i]
+        return preds.astype(float)
+
+
+@registry.register
+class EnvPointPatternAnalysis(BaseAlgorithm):
+    """Point pattern analysis — environmental clustering of GPS fixes."""
+    name        = "Env Point Pattern Analysis"
+    service_id  = 3
+    category    = "spatial"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Nearest-neighbour distances reveal environmental aggregation"
+
+    def __init__(self):
+        super().__init__()
+        self.mean_nn_dist_ = None
+
+    def fit(self, X, y=None):
+        E = _env_features(X)[:, :2]
+        D = cdist(E, E)
+        np.fill_diagonal(D, np.inf)
+        nn_dists = D.min(axis=1)
+        self.mean_nn_dist_ = nn_dists.mean()
+        self.nn_dists_train_ = nn_dists
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)[:, :2]
+        E_train = _env_features(X)[:, :2]  # same X
+        D = cdist(E, E_train)
+        np.fill_diagonal(D, np.inf)
+        return D.min(axis=1).astype(float)
+
+
+@registry.register
+class EnvSpatialScanStatistic(BaseAlgorithm):
+    """Spatial scan proxy — detect environmental hotspot windows."""
+    name        = "Env Spatial Scan Statistic"
+    service_id  = 3
+    category    = "spatial"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Sliding window scan for high-density environmental use zones"
+
+    def __init__(self, window: int = 20):
+        super().__init__(window=window)
+        self.window = window
+        self.global_rate_ = None
+
+    def fit(self, X, y=None):
+        self.global_rate_ = X[:, 0].mean()
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        speed = X[:, 0]
+        n = len(speed)
+        w = self.window
+        scores = np.zeros(n)
+        for i in range(n):
+            window_data = speed[max(0, i - w): min(n, i + w + 1)]
+            local_rate = window_data.mean()
+            scores[i] = (local_rate - self.global_rate_) / (self.global_rate_ + 1e-9)
+        return scores.astype(float)
+
+
+@registry.register
+class EnvRipleysK(BaseAlgorithm):
+    """Ripley's K function: clustering scale in environmental space."""
+    name        = "Env Ripley's K"
+    service_id  = 3
+    category    = "spatial"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "K-function evaluates environmental clustering at multiple scales"
+
+    def __init__(self, r: float = 0.5):
+        super().__init__(r=r)
+        self.r = r
+
+    def fit(self, X, y=None):
+        E = _env_features(X)[:, :2]
+        self.E_train_ = E
+        n = len(E)
+        D = cdist(E, E)
+        self.K_ = np.sum(D < self.r) / (n * (n - 1))
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)[:, :2]
+        D = cdist(E, self.E_train_)
+        k_local = (D < self.r).sum(axis=1) / len(self.E_train_)
+        return k_local.astype(float)
+
+
+@registry.register
+class EnvLandscapeConnectivity(BaseAlgorithm):
+    """Landscape connectivity: path resistance from terrain and NDVI."""
+    name        = "Env Landscape Connectivity"
+    service_id  = 3
+    category    = "spatial"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Resistance surface: high turn + high terrain = low connectivity"
+
+    def __init__(self):
+        super().__init__()
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        terrain = E[:, 0]  # terrain ruggedness
+        ndvi    = E[:, 2]  # NDVI proxy (higher = more vegetation friction)
+        resistance = (terrain / (terrain.max() + 1e-9) + ndvi / (ndvi.max() + 1e-9)) / 2
+        connectivity = 1 - resistance
+        return connectivity.astype(float)
+
+
+@registry.register
+class EnvThiessenPolygons(BaseAlgorithm):
+    """Thiessen polygon proxy: assigns env zone by nearest cluster centroid."""
+    name        = "Env Thiessen Polygon Proxy"
+    service_id  = 3
+    category    = "spatial"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Voronoi-style habitat zone assignment from cluster centroids"
+
+    def __init__(self, n_zones: int = 5):
+        super().__init__(n_zones=n_zones)
+        self.km = KMeans(n_clusters=n_zones, random_state=42, n_init=5)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)[:, :2]
+        self.km.fit(E)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)[:, :2]
+        return self.km.predict(E).astype(float)
+
+
+@registry.register
+class EnvSpatialRegressionProxy(BaseAlgorithm):
+    """Spatial lag regression: movement influenced by neighbourhood environment."""
+    name        = "Env Spatial Lag Regression"
+    service_id  = 3
+    category    = "spatial"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Spatial lag model: neighbouring altitude predicts local speed"
+
+    def __init__(self, lag: int = 5, rho: float = 0.5):
+        super().__init__(lag=lag, rho=rho)
+        self.lag = lag
+        self.rho = rho
+        self.model = LinearRegression()
+
+    def fit(self, X, y=None):
+        alt = X[:, 1]
+        # Spatial lag = average altitude of neighbours (window)
+        lag_alt = np.convolve(alt, np.ones(self.lag) / self.lag, mode="same")
+        E = _env_features(X)
+        Xlr = np.column_stack([E, lag_alt])
+        self.model.fit(Xlr, X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        alt = X[:, 1]
+        lag_alt = np.convolve(alt, np.ones(self.lag) / self.lag, mode="same")
+        E = _env_features(X)
+        Xlr = np.column_stack([E, lag_alt])
+        return self.model.predict(Xlr).astype(float)
+
+
+@registry.register
+class EnvGetisOrd(BaseAlgorithm):
+    """Getis-Ord Gi*: local hotspot detection in environmental use space."""
+    name        = "Env Getis-Ord Gi*"
+    service_id  = 3
+    category    = "spatial"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Local G-statistic identifies environmental hotspots and coldspots"
+
+    def __init__(self, window: int = 15):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        s = X[:, 0]
+        self.global_mean_ = s.mean()
+        self.global_std_  = s.std() + 1e-9
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        s = X[:, 0]
+        n = len(s)
+        w = self.window
+        G = np.zeros(n)
+        for i in range(n):
+            window = s[max(0, i - w): min(n, i + w + 1)]
+            G[i] = (window.mean() - self.global_mean_) / self.global_std_ * np.sqrt(len(window))
+        return G.astype(float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORY 6 — ECOLOGICAL & HABITAT MODELS  (algos 76–82)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class EnvResourceSelectionFunction(BaseAlgorithm):
+    """RSF: probability of habitat use relative to availability."""
+    name        = "Env Resource Selection Function"
+    service_id  = 3
+    category    = "ecological"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Logistic RSF: which environmental conditions animals prefer"
+
+    def __init__(self):
+        super().__init__()
+        from sklearn.linear_model import LogisticRegression
+        self.model = LogisticRegression(max_iter=500)
+
+    def fit(self, X, y=None):
+        from sklearn.linear_model import LogisticRegression
+        E = _env_features(X)
+        # Label high-speed points as "used", low-speed as "available"
+        used = (X[:, 0] > np.percentile(X[:, 0], 50)).astype(int)
+        self.model.fit(E, used)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict_proba(_env_features(X))[:, 1].astype(float)
+
+
+@registry.register
+class EnvStepSelectionFunction(BaseAlgorithm):
+    """SSF: conditional logistic for step-level habitat selection."""
+    name        = "Env Step Selection Function"
+    service_id  = 3
+    category    = "ecological"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "SSF models habitat selection at each movement step"
+
+    def __init__(self):
+        super().__init__()
+        self.model = Ridge(alpha=1.0)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        # Relative selection: actual step vs previous step
+        target = X[:, 6]  # step_length_m
+        self.model.fit(E, target)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvMaxEntProxy(BaseAlgorithm):
+    """MaxEnt proxy: maximum entropy habitat suitability model."""
+    name        = "Env MaxEnt Proxy"
+    service_id  = 3
+    category    = "ecological"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "MaxEnt-inspired softmax suitability from environmental features"
+
+    def __init__(self, n_components: int = 4):
+        super().__init__(n_components=n_components)
+        self.pca = PCA(n_components=n_components)
+        self.lambdas_ = None
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        Z = self.pca.fit_transform(E)
+        # Lambdas estimated from mean of used locations (high speed)
+        used = X[:, 0] > np.percentile(X[:, 0], 50)
+        self.lambdas_ = Z[used].mean(axis=0)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        Z = self.pca.transform(E)
+        # Softmax-based suitability
+        scores = Z @ self.lambdas_
+        return (np.exp(scores) / (np.exp(scores).sum() + 1e-9)).astype(float)
+
+
+@registry.register
+class EnvHabitatSuitabilityIndex(BaseAlgorithm):
+    """Habitat Suitability Index: expert-rule weighted environmental score."""
+    name        = "Env Habitat Suitability Index"
+    service_id  = 3
+    category    = "ecological"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "HSI combines NDVI, terrain and water proximity into a score"
+
+    def __init__(self):
+        super().__init__()
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        ndvi    = (E[:, 2] - E[:, 2].min()) / (np.ptp(E[:, 2]) + 1e-9)
+        terrain = 1 - (E[:, 0] - E[:, 0].min()) / (np.ptp(E[:, 0]) + 1e-9)
+        water   = (E[:, 6] - E[:, 6].min()) / (np.ptp(E[:, 6]) + 1e-9)
+        hsi = 0.4 * ndvi + 0.3 * terrain + 0.3 * water
+        return hsi.astype(float)
+
+
+@registry.register
+class EnvEcologicalNicheModel(BaseAlgorithm):
+    """Ecological niche model: bioclimate envelope from movement altitude proxy."""
+    name        = "Env Ecological Niche Model"
+    service_id  = 3
+    category    = "ecological"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Mahalanobis-distance niche model from environmental centroids"
+
+    def __init__(self):
+        super().__init__()
+        self.centroid_ = None
+        self.cov_inv_  = None
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.centroid_ = E.mean(axis=0)
+        cov = np.cov(E.T) + np.eye(E.shape[1]) * 1e-6
+        self.cov_inv_ = np.linalg.inv(cov)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        diffs = E - self.centroid_
+        dists = np.array([d @ self.cov_inv_ @ d for d in diffs])
+        suitability = np.exp(-0.5 * dists)
+        return suitability.astype(float)
+
+
+@registry.register
+class EnvBioclimaticEnvelope(BaseAlgorithm):
+    """Bioclimatic envelope: min/max altitude bounding box habitat model."""
+    name        = "Env Bioclimatic Envelope"
+    service_id  = 3
+    category    = "ecological"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "BIOCLIM-style bounding envelope for environmental tolerance"
+
+    def __init__(self, percentile: float = 5.0):
+        super().__init__(percentile=percentile)
+        self.p = percentile
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.lower_ = np.percentile(E, self.p, axis=0)
+        self.upper_ = np.percentile(E, 100 - self.p, axis=0)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        in_envelope = np.all((E >= self.lower_) & (E <= self.upper_), axis=1)
+        return in_envelope.astype(float)
+
+
+@registry.register
+class EnvSDMRandomForest(BaseAlgorithm):
+    """Species Distribution Model using Random Forest on environmental features."""
+    name        = "Env SDM Random Forest"
+    service_id  = 3
+    category    = "ecological"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "RF-based SDM: predicts habitat suitability probability"
+
+    def __init__(self, n_estimators: int = 50):
+        super().__init__(n_estimators=n_estimators)
+        self.model = RandomForestClassifier(n_estimators=n_estimators, random_state=42)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        # Presence = high speed (active use), pseudo-absence = low speed
+        presence = (X[:, 0] > np.percentile(X[:, 0], 40)).astype(int)
+        self.model.fit(E, presence)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict_proba(_env_features(X))[:, 1].astype(float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORY 7 — ENVIRONMENTAL FEATURE ENGINEERING  (algos 83–93)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class EnvTerrainRuggedness(BaseAlgorithm):
+    """Terrain Ruggedness Index from altitude gradient variance."""
+    name        = "Env Terrain Ruggedness Index"
+    service_id  = 3
+    category    = "feature_engineering"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "TRI: local altitude variability as terrain ruggedness proxy"
+
+    def __init__(self, window: int = 5):
+        super().__init__(window=window)
+        self.window = window
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        alt = X[:, 1]
+        tri = np.array([
+            np.std(alt[max(0, i - self.window): min(len(alt), i + self.window + 1)])
+            for i in range(len(alt))
+        ])
+        return tri.astype(float)
+
+
+@registry.register
+class EnvNDVIProxy(BaseAlgorithm):
+    """NDVI proxy: speed-turn interaction as vegetation friction estimate."""
+    name        = "Env NDVI Proxy"
+    service_id  = 3
+    category    = "feature_engineering"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "NDVI proxy: low speed + high turn = dense vegetation"
+
+    def __init__(self):
+        super().__init__()
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        speed = X[:, 0]
+        turn  = X[:, 2]
+        ndvi  = (1 / (speed + 1)) * (turn / (turn.max() + 1e-9))
+        return ndvi.astype(float)
+
+
+@registry.register
+class EnvSlopeAspect(BaseAlgorithm):
+    """Slope and aspect estimation from sequential altitude changes."""
+    name        = "Env Slope & Aspect"
+    service_id  = 3
+    category    = "feature_engineering"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Estimate terrain slope magnitude from altitude gradient"
+
+    def __init__(self):
+        super().__init__()
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        alt = X[:, 1]
+        slope = np.abs(np.gradient(alt))
+        return slope.astype(float)
+
+
+@registry.register
+class EnvElevationGradient(BaseAlgorithm):
+    """Elevation gradient: direction and magnitude of terrain change."""
+    name        = "Env Elevation Gradient"
+    service_id  = 3
+    category    = "feature_engineering"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Signed elevation gradient reveals uphill/downhill movement"
+
+    def __init__(self):
+        super().__init__()
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return np.gradient(X[:, 7]).astype(float)  # alt_roll_mean gradient
+
+
+@registry.register
+class EnvProximityWater(BaseAlgorithm):
+    """Proximity to water: low-speed, low-altitude zones as water proxy."""
+    name        = "Env Proximity Water Proxy"
+    service_id  = 3
+    category    = "feature_engineering"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Low alt + low speed → near-water movement behaviour signal"
+
+    def __init__(self):
+        super().__init__()
+
+    def fit(self, X, y=None):
+        self.alt_thresh_  = np.percentile(X[:, 1], 25)
+        self.spd_thresh_  = np.percentile(X[:, 0], 25)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        near = ((X[:, 1] < self.alt_thresh_) & (X[:, 0] < self.spd_thresh_)).astype(float)
+        return near.astype(float)
+
+
+@registry.register
+class EnvSolarRadiationModel(BaseAlgorithm):
+    """Solar radiation proxy: straightness × speed as insolation proxy."""
+    name        = "Env Solar Radiation Model"
+    service_id  = 3
+    category    = "feature_engineering"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Solar proxy: fast straight movement correlates with high sun"
+
+    def __init__(self):
+        super().__init__()
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        solar = X[:, 3] * X[:, 4]  # straightness × speed_roll_mean
+        return solar.astype(float)
+
+
+@registry.register
+class EnvResourceAvailabilityScore(BaseAlgorithm):
+    """Resource availability: inverse of turning angle (straighter = open resources)."""
+    name        = "Env Resource Availability Score"
+    service_id  = 3
+    category    = "feature_engineering"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Straight fast movement = high resource availability proxy"
+
+    def __init__(self):
+        super().__init__()
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        resource = X[:, 0] / (X[:, 2] + 1)  # speed / (turn + 1)
+        return resource.astype(float)
+
+
+@registry.register
+class EnvWeatherFeatureDerivation(BaseAlgorithm):
+    """Weather proxy: speed variance as wind gust surrogate."""
+    name        = "Env Weather Feature Derivation"
+    service_id  = 3
+    category    = "feature_engineering"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Speed roll-std as wind proxy; temperature from altitude lapse rate"
+
+    def __init__(self, lapse_rate: float = 6.5):
+        super().__init__(lapse_rate=lapse_rate)
+        self.lapse_rate = lapse_rate
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        wind_proxy = X[:, 5]  # speed_roll_std
+        temp_proxy = 15 - self.lapse_rate * X[:, 1] / 1000  # lapse-rate T
+        return (wind_proxy + temp_proxy / 30).astype(float)  # combined score
+
+
+@registry.register
+class EnvFractalDimension(BaseAlgorithm):
+    """Fractal dimension of altitude series — environmental complexity."""
+    name        = "Env Fractal Dimension"
+    service_id  = 3
+    category    = "feature_engineering"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Local Higuchi fractal dimension of altitude time series"
+
+    def __init__(self, window: int = 20, k_max: int = 4):
+        super().__init__(window=window, k_max=k_max)
+        self.window = window
+        self.k_max = k_max
+
+    def _higuchi_fd(self, x):
+        n = len(x)
+        if n < 4:
+            return 1.5
+        lk = []
+        for k in range(1, self.k_max + 1):
+            lengths = []
+            for m in range(1, k + 1):
+                idx = np.arange(m - 1, n, k)
+                if len(idx) < 2:
+                    continue
+                vals = x[idx]
+                lm = (np.sum(np.abs(np.diff(vals))) * (n - 1) / (k * len(vals))) / k
+                lengths.append(lm)
+            if lengths:
+                lk.append(np.mean(lengths))
+        if len(lk) < 2:
+            return 1.5
+        log_k = np.log(np.arange(1, len(lk) + 1))
+        log_l = np.log(np.array(lk) + 1e-9)
+        slope = np.polyfit(log_k, log_l, 1)[0]
+        return abs(slope)
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        alt = X[:, 1]
+        n = len(alt)
+        w = self.window
+        fd = np.zeros(n)
+        for i in range(n):
+            seg = alt[max(0, i - w): min(n, i + w + 1)]
+            fd[i] = self._higuchi_fd(seg)
+        return fd.astype(float)
+
+
+@registry.register
+class EnvHabitatBoundaryDetector(BaseAlgorithm):
+    """Habitat boundary: abrupt turning-angle spikes signal edge crossings."""
+    name        = "Env Habitat Boundary Detector"
+    service_id  = 3
+    category    = "feature_engineering"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Turning-angle threshold identifies habitat edge crossings"
+
+    def __init__(self, threshold_percentile: float = 90):
+        super().__init__(threshold_percentile=threshold_percentile)
+        self.threshold_percentile = threshold_percentile
+        self.threshold_ = None
+
+    def fit(self, X, y=None):
+        self.threshold_ = np.percentile(X[:, 2], self.threshold_percentile)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return (X[:, 2] > self.threshold_).astype(float)
+
+
+@registry.register
+class EnvEnergyExpenditure(BaseAlgorithm):
+    """Energy expenditure proxy: speed² × terrain ruggedness."""
+    name        = "Env Energy Expenditure Proxy"
+    service_id  = 3
+    category    = "feature_engineering"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Mechanical energy proxy: speed² scaled by terrain cost"
+
+    def __init__(self):
+        super().__init__()
+
+    def fit(self, X, y=None):
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        speed = X[:, 0]
+        tri   = np.abs(np.gradient(X[:, 1]))
+        energy = speed ** 2 * (1 + tri / (tri.max() + 1e-9))
+        return energy.astype(float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORY 8 — ENSEMBLE / HYBRID METHODS  (algos 94–100)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class EnvStackingEnsemble(BaseAlgorithm):
+    """Stacking ensemble: RF + Ridge meta-learner for environmental prediction."""
+    name        = "Env Stacking Ensemble"
+    service_id  = 3
+    category    = "ensemble"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Stacked generalisation combining RF and Ridge base learners"
+
+    def __init__(self):
+        super().__init__()
+        self.model = StackingRegressor(
+            estimators=[
+                ("rf",    RandomForestRegressor(n_estimators=30, random_state=42)),
+                ("ridge", Ridge(alpha=1.0)),
+            ],
+            final_estimator=Ridge(alpha=0.5),
+            cv=3,
+        )
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvVotingEnsemble(BaseAlgorithm):
+    """Voting ensemble: averaged predictions from diverse environmental models."""
+    name        = "Env Voting Ensemble"
+    service_id  = 3
+    category    = "ensemble"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Average of Ridge, KNN and Decision Tree environmental models"
+
+    def __init__(self):
+        super().__init__()
+        self.model = VotingRegressor(estimators=[
+            ("ridge", Ridge()),
+            ("knn",   KNeighborsRegressor(n_neighbors=5)),
+            ("dt",    DecisionTreeRegressor(max_depth=4, random_state=42)),
+        ])
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X), X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvHybridDeepSpatial(BaseAlgorithm):
+    """Hybrid MLP + spatial smoothing for combined env-movement modelling."""
+    name        = "Env Hybrid Deep+Spatial"
+    service_id  = 3
+    category    = "ensemble"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "MLP predictions spatially smoothed with Gaussian kernel"
+
+    def __init__(self, hidden: int = 32, epochs: int = 50, spatial_bw: int = 10):
+        super().__init__(hidden=hidden, epochs=epochs, spatial_bw=spatial_bw)
+        self.hidden = hidden
+        self.epochs = epochs
+        self.spatial_bw = spatial_bw
+
+    def _relu(self, x): return np.maximum(0, x)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        n_in = E.shape[1]
+        self.W1 = np.random.randn(n_in, self.hidden) * 0.1
+        self.b1 = np.zeros(self.hidden)
+        self.W2 = np.random.randn(self.hidden, 1) * 0.1
+        self.b2 = np.zeros(1)
+        target = X[:, 0:1]
+        lr = 0.01
+        for _ in range(self.epochs):
+            h = self._relu(E @ self.W1 + self.b1)
+            pred = h @ self.W2 + self.b2
+            err = pred - target
+            self.W2 -= lr * h.T @ err / len(E)
+            self.b2 -= lr * err.mean(axis=0)
+            dh = err @ self.W2.T * (h > 0)
+            self.W1 -= lr * E.T @ dh / len(E)
+            self.b1 -= lr * dh.mean(axis=0)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        h = self._relu(E @ self.W1 + self.b1)
+        raw = (h @ self.W2 + self.b2).ravel()
+        # Spatial smoothing
+        kernel = np.exp(-0.5 * (np.arange(-(self.spatial_bw), self.spatial_bw + 1) / (self.spatial_bw / 2)) ** 2)
+        kernel /= kernel.sum()
+        return np.convolve(raw, kernel, mode="same").astype(float)
+
+
+@registry.register
+class EnvModelAveraging(BaseAlgorithm):
+    """Model averaging with AIC-based weights for environmental models."""
+    name        = "Env Model Averaging (AIC)"
+    service_id  = 3
+    category    = "ensemble"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "AIC-weighted average of linear, polynomial and ridge models"
+
+    def __init__(self):
+        super().__init__()
+        self.models = [
+            LinearRegression(),
+            Ridge(alpha=1.0),
+            Ridge(alpha=10.0),
+        ]
+        self.weights_ = None
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        target = X[:, 0]
+        aics = []
+        for m in self.models:
+            m.fit(E, target)
+            resid = target - m.predict(E)
+            sse = np.sum(resid ** 2)
+            n = len(target)
+            k = E.shape[1] + 1
+            aic = n * np.log(sse / n + 1e-9) + 2 * k
+            aics.append(aic)
+        aics = np.array(aics)
+        delta = aics - aics.min()
+        w = np.exp(-0.5 * delta)
+        self.weights_ = w / w.sum()
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        preds = np.stack([m.predict(E) for m in self.models], axis=1)
+        return (preds @ self.weights_).astype(float)
+
+
+@registry.register
+class EnvRandomSubspaceEnsemble(BaseAlgorithm):
+    """Random subspace ensemble: each tree uses random env feature subset."""
+    name        = "Env Random Subspace Ensemble"
+    service_id  = 3
+    category    = "ensemble"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Diverse models trained on random environmental feature subsets"
+
+    def __init__(self, n_estimators: int = 20, max_features: int = 6):
+        super().__init__(n_estimators=n_estimators, max_features=max_features)
+        self.n_estimators = n_estimators
+        self.max_features = max_features
+        self.estimators_ = []
+        self.feature_sets_ = []
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        n_feat = E.shape[1]
+        np.random.seed(42)
+        self.estimators_ = []
+        self.feature_sets_ = []
+        for _ in range(self.n_estimators):
+            feat_idx = np.random.choice(n_feat, min(self.max_features, n_feat), replace=False)
+            m = Ridge(alpha=1.0)
+            m.fit(E[:, feat_idx], X[:, 0])
+            self.estimators_.append(m)
+            self.feature_sets_.append(feat_idx)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        preds = np.stack([m.predict(E[:, fidx])
+                          for m, fidx in zip(self.estimators_, self.feature_sets_)], axis=1)
+        return preds.mean(axis=1).astype(float)
+
+
+@registry.register
+class EnvBlendedNeuralStatistical(BaseAlgorithm):
+    """Blended Neural + Ridge: 50/50 average of deep and statistical outputs."""
+    name        = "Env Blended Neural+Statistical"
+    service_id  = 3
+    category    = "ensemble"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Equal blend of MLP and Ridge for stable environmental predictions"
+
+    def __init__(self, hidden: int = 32, epochs: int = 50):
+        super().__init__(hidden=hidden, epochs=epochs)
+        self.hidden = hidden
+        self.epochs = epochs
+        self.ridge = Ridge(alpha=1.0)
+
+    def _relu(self, x): return np.maximum(0, x)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.ridge.fit(E, X[:, 0])
+        n_in = E.shape[1]
+        self.W1 = np.random.randn(n_in, self.hidden) * 0.1
+        self.b1 = np.zeros(self.hidden)
+        self.W2 = np.random.randn(self.hidden, 1) * 0.1
+        self.b2 = np.zeros(1)
+        target = X[:, 0:1]
+        lr = 0.01
+        for _ in range(self.epochs):
+            h = self._relu(E @ self.W1 + self.b1)
+            pred = h @ self.W2 + self.b2
+            err = pred - target
+            self.W2 -= lr * h.T @ err / len(E)
+            self.b2 -= lr * err.mean(axis=0)
+            dh = err @ self.W2.T * (h > 0)
+            self.W1 -= lr * E.T @ dh / len(E)
+            self.b1 -= lr * dh.mean(axis=0)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        ridge_pred = self.ridge.predict(E)
+        h = self._relu(E @ self.W1 + self.b1)
+        nn_pred = (h @ self.W2 + self.b2).ravel()
+        return ((ridge_pred + nn_pred) / 2).astype(float)
+
+
+@registry.register
+class EnvSpatioTemporalHybrid(BaseAlgorithm):
+    """Spatio-temporal hybrid: Kalman spatial smoothing + temporal RF."""
+    name        = "Env Spatio-Temporal Hybrid"
+    service_id  = 3
+    category    = "ensemble"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Combines Kalman-smoothed env state with RF temporal prediction"
+
+    def __init__(self, n_estimators: int = 50):
+        super().__init__(n_estimators=n_estimators)
+        self.rf = RandomForestRegressor(n_estimators=n_estimators, random_state=42)
+
+    def _kalman(self, s, Q=1e-3, R=0.1):
+        out = np.zeros(len(s))
+        out[0] = s[0]
+        P = 1.0
+        for i in range(1, len(s)):
+            P_pred = P + Q
+            K = P_pred / (P_pred + R)
+            out[i] = out[i-1] + K * (s[i] - out[i-1])
+            P = (1-K) * P_pred
+        return out
+
+    def fit(self, X, y=None):
+        alt_smooth = self._kalman(X[:, 1])
+        X_aug = np.column_stack([_env_features(X), alt_smooth])
+        self.rf.fit(X_aug, X[:, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        alt_smooth = self._kalman(X[:, 1])
+        X_aug = np.column_stack([_env_features(X), alt_smooth])
+        return self.rf.predict(X_aug).astype(float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORY 9 — CAUSAL / EXPLAINABLE MODELS  (algos 101–105)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class EnvStructuralEquationModel(BaseAlgorithm):
+    """SEM proxy: path coefficients for environment → movement chain."""
+    name        = "Env Structural Equation Model"
+    service_id  = 3
+    category    = "causal"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "SEM proxy: causal path alt→ndvi→speed via chained regression"
+
+    def __init__(self):
+        super().__init__()
+        self.m1 = LinearRegression()  # alt → ndvi proxy
+        self.m2 = LinearRegression()  # ndvi → speed
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        ndvi = E[:, 2:3]
+        self.m1.fit(X[:, 1:2], ndvi)  # alt → ndvi
+        self.m2.fit(ndvi, X[:, 0])    # ndvi → speed
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        ndvi_hat = self.m1.predict(X[:, 1:2])
+        return self.m2.predict(ndvi_hat).astype(float)
+
+
+@registry.register
+class EnvSHAPFeatureImportance(BaseAlgorithm):
+    """SHAP-style permutation importance for environmental features."""
+    name        = "Env SHAP Feature Importance"
+    service_id  = 3
+    category    = "causal"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Permutation importance reveals which env features drive speed"
+
+    def __init__(self, n_estimators: int = 30):
+        super().__init__(n_estimators=n_estimators)
+        self.rf = RandomForestRegressor(n_estimators=n_estimators, random_state=42)
+        self.importances_ = None
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.rf.fit(E, X[:, 0])
+        self.importances_ = self.rf.feature_importances_
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        # Return weighted sum of env features by importance
+        return (E * self.importances_).sum(axis=1).astype(float)
+
+
+@registry.register
+class EnvPartialDependencePlot(BaseAlgorithm):
+    """Partial dependence: marginal effect of terrain on speed."""
+    name        = "Env Partial Dependence"
+    service_id  = 3
+    category    = "causal"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Marginal effect of terrain ruggedness on movement speed"
+
+    def __init__(self, feature_idx: int = 0):
+        super().__init__(feature_idx=feature_idx)
+        self.feature_idx = feature_idx
+        self.model = GradientBoostingRegressor(n_estimators=50)
+        self.grid_ = None
+        self.pdp_  = None
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.model.fit(E, X[:, 0])
+        self.grid_ = np.linspace(E[:, self.feature_idx].min(),
+                                  E[:, self.feature_idx].max(), 20)
+        pdp = []
+        for val in self.grid_:
+            E_mod = E.copy()
+            E_mod[:, self.feature_idx] = val
+            pdp.append(self.model.predict(E_mod).mean())
+        self.pdp_ = np.array(pdp)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        feat_vals = E[:, self.feature_idx]
+        return np.interp(feat_vals, self.grid_, self.pdp_).astype(float)
+
+
+@registry.register
+class EnvCausalForestProxy(BaseAlgorithm):
+    """Causal forest proxy: treatment effect of high vs low altitude."""
+    name        = "Env Causal Forest Proxy"
+    service_id  = 3
+    category    = "causal"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "ITE estimate: speed difference due to high vs low altitude treatment"
+
+    def __init__(self, n_estimators: int = 30):
+        super().__init__(n_estimators=n_estimators)
+        self.rf_treated   = RandomForestRegressor(n_estimators=n_estimators, random_state=1)
+        self.rf_control   = RandomForestRegressor(n_estimators=n_estimators, random_state=2)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        treatment = (X[:, 1] > np.median(X[:, 1])).astype(bool)
+        self.rf_treated.fit(E[treatment], X[treatment, 0])
+        self.rf_control.fit(E[~treatment], X[~treatment, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        ite = self.rf_treated.predict(E) - self.rf_control.predict(E)
+        return ite.astype(float)
+
+
+@registry.register
+class EnvFeatureImportanceRankings(BaseAlgorithm):
+    """Feature importance ranking across multiple environmental models."""
+    name        = "Env Feature Importance Rankings"
+    service_id  = 3
+    category    = "causal"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Consensus ranking of environmental features across RF, GB, ET"
+
+    def __init__(self):
+        super().__init__()
+        self.models = [
+            RandomForestRegressor(n_estimators=20, random_state=0),
+            GradientBoostingRegressor(n_estimators=20),
+            ExtraTreesRegressor(n_estimators=20, random_state=0),
+        ]
+        self.consensus_importance_ = None
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        importances = []
+        for m in self.models:
+            m.fit(E, X[:, 0])
+            importances.append(m.feature_importances_)
+        self.consensus_importance_ = np.mean(importances, axis=0)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        return (E * self.consensus_importance_).sum(axis=1).astype(float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORY 10 — UNSUPERVISED / CLUSTERING  (algos 106–114)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class EnvKMeansEnv(BaseAlgorithm):
+    """k-Means clustering of environmental space into habitat types."""
+    name        = "Env K-Means Clustering"
+    service_id  = 3
+    category    = "unsupervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "K-means partitions environmental space into habitat clusters"
+
+    def __init__(self, n_clusters: int = 4):
+        super().__init__(n_clusters=n_clusters)
+        self.model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X))
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvHierarchicalClustering(BaseAlgorithm):
+    """Agglomerative clustering of environmental conditions."""
+    name        = "Env Hierarchical Clustering"
+    service_id  = 3
+    category    = "unsupervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Ward linkage hierarchical clustering of env feature space"
+
+    def __init__(self, n_clusters: int = 4):
+        super().__init__(n_clusters=n_clusters)
+        self.model = AgglomerativeClustering(n_clusters=n_clusters, linkage="ward")
+        self.cluster_centers_ = None
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        labels = self.model.fit_predict(E)
+        self.cluster_centers_ = np.array([E[labels == k].mean(axis=0)
+                                           for k in range(self.model.n_clusters)])
+        self.labels_train_ = labels
+        self.E_train_ = E
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        # Assign to nearest cluster centre
+        D = cdist(E, self.cluster_centers_)
+        return D.argmin(axis=1).astype(float)
+
+
+@registry.register
+class EnvDBSCANEnv(BaseAlgorithm):
+    """DBSCAN: density-based detection of environmental use clusters."""
+    name        = "Env DBSCAN Clustering"
+    service_id  = 3
+    category    = "unsupervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "DBSCAN finds arbitrary-shaped clusters in environmental space"
+
+    def __init__(self, eps: float = 0.5, min_samples: int = 5):
+        super().__init__(eps=eps, min_samples=min_samples)
+        self.model = DBSCAN(eps=eps, min_samples=min_samples)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.labels_ = self.model.fit_predict(E)
+        self.E_train_ = E
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        if len(E) == len(self.E_train_):
+            return self.labels_.astype(float)
+        D = cdist(E, self.E_train_)
+        nearest = D.argmin(axis=1)
+        return self.labels_[nearest].astype(float)
+
+
+@registry.register
+class EnvHDBSCANEnv(BaseAlgorithm):
+    """HDBSCAN: hierarchical density clustering for varying env densities."""
+    name        = "Env HDBSCAN Clustering"
+    service_id  = 3
+    category    = "unsupervised"
+    library     = "hdbscan"
+    animals     = ["all"]
+    description = "HDBSCAN adapts cluster density to environmental heterogeneity"
+
+    def __init__(self, min_cluster_size: int = 10):
+        super().__init__(min_cluster_size=min_cluster_size)
+        self.min_cluster_size = min_cluster_size
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        if _HAS_HDBSCAN:
+            clusterer = hdbscan.HDBSCAN(min_cluster_size=self.min_cluster_size)
+            self.labels_ = clusterer.fit_predict(E)
+        else:
+            km = KMeans(n_clusters=4, random_state=42, n_init=5)
+            self.labels_ = km.fit_predict(E)
+        self.E_train_ = E
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        if len(E) == len(self.E_train_):
+            return self.labels_.astype(float)
+        D = cdist(E, self.E_train_)
+        nearest = D.argmin(axis=1)
+        return self.labels_[nearest].astype(float)
+
+
+@registry.register
+class EnvGMMEnv(BaseAlgorithm):
+    """Gaussian Mixture Model: probabilistic habitat zone membership."""
+    name        = "Env Gaussian Mixture Model"
+    service_id  = 3
+    category    = "unsupervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "GMM assigns soft habitat memberships from environmental features"
+
+    def __init__(self, n_components: int = 4):
+        super().__init__(n_components=n_components)
+        self.model = GaussianMixture(n_components=n_components, random_state=42)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X))
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+@registry.register
+class EnvSpectralClusteringEnv(BaseAlgorithm):
+    """Spectral clustering in environmental similarity graph."""
+    name        = "Env Spectral Clustering"
+    service_id  = 3
+    category    = "unsupervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Graph-based spectral clustering of environmental affinity matrix"
+
+    def __init__(self, n_clusters: int = 4):
+        super().__init__(n_clusters=n_clusters)
+        self.model = SpectralClustering(n_clusters=n_clusters, random_state=42, affinity="rbf")
+        self.km_fallback = KMeans(n_clusters=n_clusters, random_state=42, n_init=5)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        self.labels_ = self.model.fit_predict(E)
+        self.cluster_centers_ = np.array([E[self.labels_ == k].mean(axis=0)
+                                           for k in range(self.model.n_clusters)
+                                           if (self.labels_ == k).any()])
+        self.E_train_ = E
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        if len(E) == len(self.E_train_):
+            return self.labels_.astype(float)
+        D = cdist(E, self.cluster_centers_)
+        return D.argmin(axis=1).astype(float)
+
+
+@registry.register
+class EnvSOMEnv(BaseAlgorithm):
+    """Self-Organising Map: 2D environmental topology learning."""
+    name        = "Env Self-Organising Map"
+    service_id  = 3
+    category    = "unsupervised"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "SOM preserves topological structure of environmental space"
+
+    def __init__(self, n_units: int = 8, epochs: int = 200, lr: float = 0.5):
+        super().__init__(n_units=n_units, epochs=epochs, lr=lr)
+        self.n_units = n_units
+        self.epochs = epochs
+        self.lr = lr
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        n_in = E.shape[1]
+        np.random.seed(42)
+        self.weights_ = np.random.randn(self.n_units, n_in)
+        for epoch in range(self.epochs):
+            lr = self.lr * (1 - epoch / self.epochs)
+            sigma = max(1, self.n_units // 2 * (1 - epoch / self.epochs))
+            for x in E[np.random.choice(len(E), min(50, len(E)), replace=False)]:
+                dists = np.linalg.norm(self.weights_ - x, axis=1)
+                bmu = np.argmin(dists)
+                hood = np.exp(-0.5 * (np.arange(self.n_units) - bmu) ** 2 / sigma ** 2)
+                self.weights_ += lr * hood[:, None] * (x - self.weights_)
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        return np.array([np.argmin(np.linalg.norm(self.weights_ - e, axis=1))
+                         for e in E]).astype(float)
+
+
+@registry.register
+class EnvTSNEVisualization(BaseAlgorithm):
+    """t-SNE embedding: 2D environmental feature visualization."""
+    name        = "Env t-SNE Embedding"
+    service_id  = 3
+    category    = "unsupervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "t-SNE reveals nonlinear environmental clusters in 2D"
+
+    def __init__(self, perplexity: float = 30.0):
+        super().__init__(perplexity=perplexity)
+        self.perplexity = perplexity
+        self.embedding_ = None
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        n = min(len(E), 500)
+        perp = min(self.perplexity, n // 4)
+        tsne = TSNE(n_components=2, perplexity=perp, random_state=42)
+        self.embedding_ = tsne.fit_transform(E[:n])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        n = min(len(X), len(self.embedding_))
+        out = np.zeros(len(X))
+        out[:n] = self.embedding_[:n, 0]
+        return out.astype(float)
+
+
+@registry.register
+class EnvBayesianGMMEnv(BaseAlgorithm):
+    """Bayesian GMM: automatic number of environmental components."""
+    name        = "Env Bayesian GMM"
+    service_id  = 3
+    category    = "unsupervised"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "Variational Bayesian GMM infers number of habitat components"
+
+    def __init__(self, max_components: int = 6):
+        super().__init__(max_components=max_components)
+        self.model = BayesianGaussianMixture(n_components=max_components, random_state=42)
+
+    def fit(self, X, y=None):
+        self.model.fit(_env_features(X))
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        return self.model.predict(_env_features(X)).astype(float)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORY 11 — ADVANCED SPATIO-TEMPORAL  (algos 115–118)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@registry.register
+class EnvSpatioTemporalKriging(BaseAlgorithm):
+    """Spatio-temporal Kriging: interpolation across space and time."""
+    name        = "Env Spatio-Temporal Kriging"
+    service_id  = 3
+    category    = "spatio_temporal"
+    library     = "sklearn"
+    animals     = ["all"]
+    description = "GP interpolation with spatial + temporal covariance components"
+
+    def __init__(self):
+        super().__init__()
+        kernel = Matern(length_scale=1.0, nu=1.5) + WhiteKernel(noise_level=0.01)
+        self.gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=0)
+
+    def fit(self, X, y=None):
+        n = min(200, len(X))
+        t = np.arange(n).reshape(-1, 1) / n  # temporal coordinate
+        E = _env_features(X)[:n, :1]          # spatial proxy (terrain)
+        ST = np.hstack([t, E])
+        self.gp.fit(ST, X[:n, 0])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        n = len(X)
+        t = np.arange(n).reshape(-1, 1) / n
+        E = _env_features(X)[:, :1]
+        ST = np.hstack([t, E])
+        return self.gp.predict(ST).astype(float)
+
+
+@registry.register
+class EnvSTCNN(BaseAlgorithm):
+    """Spatio-temporal CNN: 1D conv over environmental temporal windows."""
+    name        = "Env ST-CNN"
+    service_id  = 3
+    category    = "spatio_temporal"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Spatio-temporal CNN: temporal convolution over env+movement"
+
+    def __init__(self, kernel_size: int = 7, n_filters: int = 4, epochs: int = 20):
+        super().__init__(kernel_size=kernel_size, n_filters=n_filters, epochs=epochs)
+        self.kernel_size = kernel_size
+        self.n_filters = n_filters
+        self.epochs = epochs
+
+    def _relu(self, x): return np.maximum(0, x)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        n_channels = 2  # speed + altitude
+        self.kernels = np.random.randn(self.n_filters, n_channels, self.kernel_size) * 0.1
+        self.W_out = np.random.randn(self.n_filters, 1) * 0.1
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        seq = X[:, :2]  # speed, altitude
+        n = len(seq)
+        k = self.kernel_size
+        maps = np.zeros((n, self.n_filters))
+        for fi in range(self.n_filters):
+            for t in range(n):
+                seg = seq[max(0, t - k + 1): t + 1]  # causal window
+                if len(seg) < k:
+                    seg = np.pad(seg, ((k - len(seg), 0), (0, 0)), mode="edge")
+                maps[t, fi] = np.sum(self.kernels[fi] * seg.T)
+        return self._relu(maps @ self.W_out).ravel().astype(float)
+
+
+@registry.register
+class EnvRNNWithEnvInputs(BaseAlgorithm):
+    """RNN conditioned on environmental feature stream alongside movement."""
+    name        = "Env RNN with Env Inputs"
+    service_id  = 3
+    category    = "spatio_temporal"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "RNN receives both movement and environmental inputs each step"
+
+    def __init__(self, hidden: int = 16, epochs: int = 30, lr: float = 0.005):
+        super().__init__(hidden=hidden, epochs=epochs, lr=lr)
+        self.hidden = hidden
+        self.epochs = epochs
+        self.lr = lr
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        n_in = 2 + 4  # speed, alt + 4 env features
+        h = self.hidden
+        self.Wx = np.random.randn(n_in, h) * 0.1
+        self.Wh = np.random.randn(h, h) * 0.1
+        self.Wy = np.random.randn(h, 1) * 0.1
+        self.bh = np.zeros(h)
+        self.by = np.zeros(1)
+        seq = np.hstack([X[:, :2], E[:, :4]])
+        for _ in range(self.epochs):
+            ht = np.zeros(h)
+            preds = []
+            for t in range(len(seq)):
+                ht = np.tanh(seq[t] @ self.Wx + ht @ self.Wh + self.bh)
+                preds.append((ht @ self.Wy + self.by).item())
+            err = np.array(preds) - X[:, 0]
+            self.Wy -= self.lr * np.outer(ht, [err.mean()])
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        seq = np.hstack([X[:, :2], E[:, :4]])
+        ht = np.zeros(self.hidden)
+        out = []
+        for t in range(len(seq)):
+            ht = np.tanh(seq[t] @ self.Wx + ht @ self.Wh + self.bh)
+            out.append((ht @ self.Wy + self.by).item())
+        return np.array(out).astype(float)
+
+
+@registry.register
+class EnvSTGNN(BaseAlgorithm):
+    """ST-GNN proxy: graph-structured environmental neighbourhood model."""
+    name        = "Env ST-GNN Proxy"
+    service_id  = 3
+    category    = "spatio_temporal"
+    library     = "numpy"
+    animals     = ["all"]
+    description = "Graph convolution over temporal neighbourhood in env feature space"
+
+    def __init__(self, k_neighbors: int = 5, epochs: int = 30, lr: float = 0.01):
+        super().__init__(k_neighbors=k_neighbors, epochs=epochs, lr=lr)
+        self.k_neighbors = k_neighbors
+        self.epochs = epochs
+        self.lr = lr
+
+    def _relu(self, x): return np.maximum(0, x)
+
+    def fit(self, X, y=None):
+        E = _env_features(X)
+        # Build adjacency from temporal proximity (k-nearest in time)
+        n = len(E)
+        self.W = np.random.randn(E.shape[1], 4) * 0.1
+        self.Wout = np.random.randn(4, 1) * 0.1
+        target = X[:, 0]
+        for _ in range(self.epochs):
+            # Graph convolution: each node aggregates k temporal neighbours
+            agg = np.zeros((n, E.shape[1]))
+            for i in range(n):
+                nb_idx = np.arange(max(0, i - self.k_neighbors),
+                                    min(n, i + self.k_neighbors + 1))
+                agg[i] = E[nb_idx].mean(axis=0)
+            h = self._relu(agg @ self.W)
+            pred = (h @ self.Wout).ravel()
+            err = pred - target
+            self.Wout -= self.lr * h.T @ err.reshape(-1, 1) / n
+            self.W -= self.lr * agg.T @ (err.reshape(-1, 1) @ self.Wout.T * (h > 0)) / n
+        self.is_fitted = True
+        return self
+
+    def predict(self, X):
+        E = _env_features(X)
+        n = len(E)
+        agg = np.zeros_like(E)
+        for i in range(n):
+            nb_idx = np.arange(max(0, i - self.k_neighbors),
+                                min(n, i + self.k_neighbors + 1))
+            agg[i] = E[nb_idx].mean(axis=0)
+        h = self._relu(agg @ self.W)
+        return (h @ self.Wout).ravel().astype(float)
+
+
+# ── End of file ──────────────────────────────────────────────────────────────
+# Total algorithms: 118 across 11 categories
+# Service ID: 3 — Environmental Factors (Sarah)
+# To activate: add to run_benchmark.py:
+#   from services.s3_environment.sarah_algorithms import *

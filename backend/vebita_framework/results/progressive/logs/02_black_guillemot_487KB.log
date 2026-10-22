@@ -1,0 +1,122 @@
+
+==================================================
+  VEBITA Algorithm Registry
+  Total algorithms registered: 150
+==================================================
+  S1 Time Series                     25 algorithms
+  S2 Pattern Recognition             25 algorithms
+  S3 Environmental Factors           25 algorithms
+  S4 Anomaly Detection               25 algorithms
+  S5 Trajectory Segmentation         25 algorithms
+  S6 Behavioural Classification      25 algorithms
+--------------------------------------------------
+  By category:
+    clustering                 19
+    statistical                16
+    B_tree                      8
+    A_linear                    8
+    forecasting                 7
+    deep_learning               7
+    motif_discovery             7
+    ml_supervised               7
+    A_statistical               7
+    C_kernel                    7
+    decomposition               6
+    D_probabilistic             6
+    time_series                 5
+    E_deep                      5
+    F_ecological                5
+    changepoint                 5
+    signal_processing           4
+    dimensionality_reduction    4
+    hmm                         4
+    ecology                     3
+    supervised                  2
+    sequential_pattern          2
+    spatial                     2
+    ecological                  2
+    correlation                 1
+    anomaly_detection           1
+==================================================
+
+Loading data: animal=red_kite, points=1200
+Data ready: 2487 train / 622 test | behaviors: []
+
+
+=======================================================
+  VEBITA Benchmark — All services
+  150 algorithms | Animal: red_kite | 2487 train / 622 test points
+=======================================================
+[S3] Starting Speed-Altitude Correlation
+[S3] Starting Env Linear Regression
+[S3] Starting Env Ridge Regression
+[S3] Starting Env Polynomial Regression
+[S3] Starting Env Quantile Regression
+[S3] Starting Env Bayesian Ridge
+[S3] Starting Env PLS Regression
+[S3] Starting Env GLM Poisson
+[S3] Starting Env GLM Gamma
+[S3] Starting Env AR Model
+[S3] Starting Env Kalman Filter
+[S3] Starting Env Seasonal Decomposition
+[S3] Starting Env Fourier Transform
+[S3] Starting Env Savitzky-Golay Filter
+[S3] Starting Env Random Forest Regressor
+[S3] Starting Env Gradient Boosting Regressor
+[S3] Starting Env XGBoost Regressor
+[S3] Starting Env SVR
+[S3] Starting Env KNN Regressor
+[S3] Starting Env Decision Tree Regressor
+[S3] Starting Env Extra Trees Regressor
+[S3] Starting Env Kernel Density Estimation
+[S3] Starting Env Geographically Weighted Regression
+[S3] Starting Env Resource Selection Function
+[S3] Starting Env Step Selection Function
+
+  Completed in 20.6s
+  OK: 140  |  Errors: 10  |  Total: 150
+Results saved → /sessions/rcw-01yxxa264jhrfaa3hmg6j3dq/mnt/Movement Project/Movement Project/vebita_shared_framework (2)/vebita_shared_framework/backend/vebita_framework/results/progressive/02_black_guillemot_487KB.csv  (150 rows)
+
+── Overall leaderboard (top 15 by accuracy) ──
+Metric 'accuracy' not available. Available: ['algo_name', 'service_id', 'category', 'status', 'runtime_s', 'memory_mb', 'error_msg']
+                   algo_name  service_id          category status  runtime_s  memory_mb error_msg
+     Moving Average Forecast           1       statistical     ok     0.0000       0.02          
+       Exponential Smoothing           1       statistical     ok     0.0005       0.01          
+                Linear Trend           1       statistical     ok     0.0018       0.13          
+  Speed-Altitude Correlation           3       correlation     ok     0.0005       0.09          
+            Isolation Forest           4 anomaly_detection     ok     0.1867       0.76          
+       Speed Z-Score Anomaly           4       statistical     ok     0.0001       0.02          
+        K-Means Segmentation           5        clustering     ok     0.0499       0.62          
+     Weighted Moving Average           1       statistical     ok     0.0001       0.01          
+              ARIMA Forecast           1       forecasting     ok     0.0009       0.10          
+             SARIMA Forecast           1       forecasting     ok     0.0009       0.10          
+Triple Exponential Smoothing           1       forecasting     ok     0.0017       0.02          
+                Theta Method           1       forecasting     ok     0.0020       0.19          
+  Linear Regression Forecast           1       forecasting     ok     0.0013       0.32          
+   Ridge Regression Forecast           1       forecasting     ok     0.0008       0.22          
+  Gradient Boosting Forecast           1       forecasting     ok     0.0135       0.23          
+
+Done. Full results saved to: /sessions/rcw-01yxxa264jhrfaa3hmg6j3dq/mnt/Movement Project/Movement Project/vebita_shared_framework (2)/vebita_shared_framework/backend/vebita_framework/results/progressive/02_black_guillemot_487KB.csv
+	Command being timed: "/sessions/rcw-01yxxa264jhrfaa3hmg6j3dq/mnt/Movement Project/Movement Project/vebita_shared_framework (2)/vebita_shared_framework/backend/vebita_framework/venv_mac/bin/python3 run_benchmark.py --csv /sessions/rcw-01yxxa264jhrfaa3hmg6j3dq/mnt/Movement Project/Movement Project/vebita_shared_framework (2)/vebita_shared_framework/backend/vebita_framework/../uploads/6144589754334ee4b21a77b4d2c6f2b7_BTO - Bangor 2021 - Black Guillemot.csv --jobs 1 --output /sessions/rcw-01yxxa264jhrfaa3hmg6j3dq/mnt/Movement Project/Movement Project/vebita_shared_framework (2)/vebita_shared_framework/backend/vebita_framework/results/progressive/02_black_guillemot_487KB.csv"
+	User time (seconds): 20.85
+	System time (seconds): 0.17
+	Percent of CPU this job got: 98%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:21.42
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 260000
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 731
+	Minor (reclaiming a frame) page faults: 34600
+	Voluntary context switches: 21213
+	Involuntary context switches: 121
+	Swaps: 0
+	File system inputs: 640
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

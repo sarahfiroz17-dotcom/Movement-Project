@@ -1,0 +1,6 @@
+label,file,size_bytes,size_human,elapsed_s,peak_mem_mb,outcome
+01_orchid_bees_21KB,6cf5570789fa45b6829e7b13c4409ba5_Orchid bees on Barro Colorado Island, Panama.csv,21046,24K,3,157,ok
+02_black_guillemot_487KB,6144589754334ee4b21a77b4d2c6f2b7_BTO - Bangor 2021 - Black Guillemot.csv,499151,488K,22,253,ok
+03_african_cuckoo_1.5MB,7968800f8abb4990af5de0d18ed958ab_African cuckoo in Nigeria (data from Iwajomo et al. 2018).csv,1595710,1.6M,67,450,ok
+03_african_cuckoo_1.5MB,7968800f8abb4990af5de0d18ed958ab_African cuckoo in Nigeria (data from Iwajomo et al. 2018).csv,1595710,1.6M,28,450,ok
+04_whooper_swan_17.6MB,9a52efaf8ac54dcd8873a08999f71576_LifeTrack Whooper Swan Latvia.csv,18462409,18M,20,3698,FAILED(exit=137)
