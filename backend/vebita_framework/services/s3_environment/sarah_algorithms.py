@@ -72,6 +72,28 @@ def _subsample_env(X, y=None, max_n=2000, seed=42):
     return X[idx], (y[idx] if y is not None else None)
 
 
+def _env_score(X: np.ndarray) -> np.ndarray:
+    """
+    Composite environmental intensity score built from raw movement features.
+    Uses unscaled magnitudes so the target has real variance even on standardised X.
+    Score = weighted sum of terrain ruggedness, speed variability, and altitude signal.
+    This gives the regression algorithms a meaningful, varying target to learn from.
+    """
+    E = _env_features(X)
+    # terrain_ruggedness (col 0), wind_proxy/spd_std (col 4), energy (col 11)
+    terrain  = E[:, 0]
+    wind     = E[:, 4]
+    energy   = E[:, 11]
+    ndvi     = E[:, 2]
+    resource = E[:, 8]
+    raw = 0.3 * terrain + 0.2 * wind + 0.2 * energy + 0.15 * ndvi + 0.15 * resource
+    # Normalise to 0-1 range using training-set statistics stored on first call
+    rng = raw.max() - raw.min()
+    if rng < 1e-9:
+        return np.zeros(len(raw))
+    return ((raw - raw.min()) / rng).astype(float)
+
+
 def _env_features(X: np.ndarray) -> np.ndarray:
     """
     Derive 12 synthetic environmental proxy features from movement features.
@@ -128,7 +150,7 @@ class EnvBayesianRidge(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=2000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -152,7 +174,7 @@ class EnvPLSRegression(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=2000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -176,7 +198,7 @@ class EnvQuantileRegression(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=2000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -208,7 +230,7 @@ class EnvKalmanFilter(BaseAlgorithm):
         return self
 
     def predict(self, X):
-        z = X[:, 1]
+        z = _env_score(X)
         n = len(z)
         max_len = 20000
         step = max(1, int(np.ceil(n / max_len))) if n > max_len else 1
@@ -244,7 +266,7 @@ class EnvFourierTransform(BaseAlgorithm):
         self.filtered_   = None
 
     def fit(self, X, y=None):
-        s = X[:, 0]
+        s = _env_score(X)
         fft = np.fft.rfft(s)
         amps = np.abs(fft)
         top_idx = np.argsort(amps)[-self.n_harmonics:]
@@ -257,7 +279,7 @@ class EnvFourierTransform(BaseAlgorithm):
     def predict(self, X):
         if self.filtered_ is not None and len(X) == len(self.filtered_):
             return self.filtered_.astype(float)
-        s = X[:, 0]
+        s = _env_score(X)
         fft = np.fft.rfft(s)
         amps = np.abs(fft)
         top_idx = np.argsort(amps)[-self.n_harmonics:]
@@ -282,7 +304,7 @@ class EnvSeasonalDecomposition(BaseAlgorithm):
         self.seasonal_ = None
 
     def fit(self, X, y=None):
-        s = X[:, 0]
+        s = _env_score(X)
         trend = np.convolve(s, np.ones(self.period) / self.period, mode="same")
         detrended = s - trend
         self.seasonal_ = np.array([
@@ -317,7 +339,7 @@ class EnvRandomForestRegressor(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=20000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -341,7 +363,7 @@ class EnvGradientBoostingRegressor(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=20000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -373,7 +395,7 @@ class EnvXGBoostRegressor(BaseAlgorithm):
             )
         else:
             self.model = GradientBoostingRegressor(n_estimators=self.n_estimators)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -406,7 +428,7 @@ class EnvMLPRegressor(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=10000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -435,7 +457,7 @@ class EnvGaussianProcessRegressor(BaseAlgorithm):
     def fit(self, X, y=None):
         # GPR training cost is O(n^3); keep sample small
         Xs, _ = _subsample_env(X, None, max_n=500)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -595,7 +617,7 @@ class EnvVotingRegressor(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=10000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -619,7 +641,7 @@ class EnvBaggingRegressor(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=20000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -651,7 +673,7 @@ class EnvLightGBMRegressor(BaseAlgorithm):
             )
         else:
             self.model = GradientBoostingRegressor(n_estimators=self.n_estimators)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -679,7 +701,7 @@ class EnvHuberRegressor(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=2000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -705,8 +727,8 @@ class EnvPermutationImportanceScore(BaseAlgorithm):
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=5000)
         E = _env_features(Xs)
-        self._base.fit(E, Xs[:, 0])
-        result = permutation_importance(self._base, E, Xs[:, 0], n_repeats=5, random_state=42)
+        self._base.fit(E, _env_score(Xs))
+        result = permutation_importance(self._base, E, _env_score(Xs), n_repeats=5, random_state=42)
         self._top_feature = int(np.argmax(result.importances_mean))
         self.is_fitted = True
         return self
@@ -732,11 +754,11 @@ class EnvGrangerCausalScore(BaseAlgorithm):
         self._best_lag = 1
 
     def fit(self, X, y=None):
-        speed = X[:, 0]
+        score = _env_score(X)
         alt   = X[:, 1]
         # Find lag that maximises cross-correlation
         correlations = [
-            abs(np.corrcoef(alt[:-lag], speed[lag:])[0, 1])
+            abs(np.corrcoef(alt[:-lag], score[lag:])[0, 1])
             for lag in range(1, self.max_lag + 1)
         ]
         self._best_lag = int(np.argmax(correlations)) + 1
@@ -744,13 +766,13 @@ class EnvGrangerCausalScore(BaseAlgorithm):
         return self
 
     def predict(self, X):
-        alt = X[:, 1]
-        n   = len(alt)
-        out = np.zeros(n, dtype=float)
-        lag = self._best_lag
-        # Score at each point = altitude value `lag` steps ago
-        out[lag:] = alt[:n - lag]
-        out[:lag] = alt[0]
+        score = _env_score(X)
+        n     = len(score)
+        out   = np.zeros(n, dtype=float)
+        lag   = self._best_lag
+        # Score at each point = env score `lag` steps ago (lagged influence)
+        out[lag:] = score[:n - lag]
+        out[:lag] = score[0]
         return out.astype(float)
 
 
@@ -774,7 +796,7 @@ class EnvSGDRegressor(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=20000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -798,7 +820,7 @@ class EnvElasticNet(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=20000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -830,7 +852,7 @@ class EnvStackingRegressor(BaseAlgorithm):
 
     def fit(self, X, y=None):
         Xs, _ = _subsample_env(X, None, max_n=5000)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
@@ -862,7 +884,7 @@ class EnvCatBoostRegressor(BaseAlgorithm):
             )
         else:
             self.model = GradientBoostingRegressor(n_estimators=self.iterations)
-        self.model.fit(_env_features(Xs), Xs[:, 0])
+        self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
         return self
 
