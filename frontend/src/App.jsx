@@ -16,6 +16,7 @@ import Docs              from './components/Docs.jsx'
 import EnvProfiles       from './components/EnvProfiles.jsx'
 import EnvScoreTime      from './components/EnvScoreTime.jsx'
 import EnvComparison     from './components/EnvComparison.jsx'
+import EnvFactors        from './components/EnvFactors.jsx'
 
 export default function App() {
   const [activeTab,    setActiveTab]    = useState('Map view')
@@ -94,6 +95,7 @@ export default function App() {
     const props = { results, serviceId }
     switch (activeTab) {
       case 'Map view':              return results?.compareMode ? <SplitMapView results={results} /> : <MapView {...props} />
+      case 'Env factors':           return <EnvFactors results={results} />
       case 'Cluster graphs':        return <ClusterGraphs {...props} />
       case 'Time series':           return <TimeSeries {...props} />
       case 'F1 scores':             return <F1Scores {...props} />

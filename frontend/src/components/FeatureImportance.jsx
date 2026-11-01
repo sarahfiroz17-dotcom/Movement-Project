@@ -59,13 +59,11 @@ export default function FeatureImportance({ results }) {
     </div>
   )
 
-  if (isRegression || !hasImportances) return (
+  if (!hasImportances) return (
     <div className="empty-state">
       <div style={{ fontSize: 28 }}>🌿</div>
       <p style={{ maxWidth: 360, textAlign: 'center' }}>
-        {isRegression
-          ? 'Feature importance is not available for Environmental Factors (regression service).'
-          : 'Feature importance was not computed for this run.'}
+        Feature importance was not computed for this run.
       </p>
     </div>
   )

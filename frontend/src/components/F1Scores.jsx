@@ -111,6 +111,33 @@ export default function F1Scores({ results }) {
 
   const winnerA = (algo_a?.f1 ?? 0) >= (algo_b?.f1 ?? 0)
 
+  // Auto-generated insight
+  const f1aVals = classes.map(c => algo_a?.per_class_f1?.[c] ?? null)
+  const f1bVals = classes.map(c => algo_b?.per_class_f1?.[c] ?? null)
+  const zeroF1Classes = classes.filter((c, i) => f1aVals[i] === 0 || f1aVals[i] === null)
+  const meanF1 = f1aVals.filter(v => v != null).reduce((s, v, _, a) => s + v / a.length, 0)
+  const insightLines = []
+  const overallF1 = algo_a?.f1
+  if (overallF1 != null) {
+    if (overallF1 > 0.85)
+      insightLines.push(`The algorithm performs well overall (weighted F1: ${overallF1.toFixed(3)}) — it classifies most behaviour states reliably.`)
+    else if (overallF1 > 0.6)
+      insightLines.push(`The algorithm achieves moderate overall performance (weighted F1: ${overallF1.toFixed(3)}). Most behaviours are detected but some classes may be confused with each other.`)
+    else
+      insightLines.push(`Overall classification performance is limited (weighted F1: ${overallF1.toFixed(3)}). The behaviour classes may overlap in the feature space, or some states are rare in the training data.`)
+  }
+  if (zeroF1Classes.length > 0) {
+    insightLines.push(`The following behaviour ${zeroF1Classes.length === 1 ? 'class was' : 'classes were'} never correctly predicted: ${zeroF1Classes.join(', ')}. This usually means the algorithm never predicted that state — the class may be underrepresented in training data or too similar to another class to distinguish.`)
+  }
+  if (compareMode && algo_a?.f1 != null && algo_b?.f1 != null) {
+    const diff = Math.abs(algo_a.f1 - algo_b.f1)
+    const better = algo_a.f1 >= algo_b.f1 ? nameA : nameB
+    if (diff > 0.05)
+      insightLines.push(`${better} outperforms the other algorithm by ${diff.toFixed(3)} F1 — a meaningful difference for a behaviour classification task.`)
+    else
+      insightLines.push(`The two algorithms perform similarly (gap: ${diff.toFixed(3)} F1). Try comparing algorithms from different categories to find larger differences.`)
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
@@ -141,6 +168,16 @@ export default function F1Scores({ results }) {
           <div className="mcard-label">{compareMode ? 'Best accuracy' : 'Accuracy'}</div>
         </div>
       </div>
+
+      {/* Auto-generated insight */}
+      {insightLines.length > 0 && (
+        <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
+          <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>
+          <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, margin: 0 }}>
+            {insightLines.join(' ')}
+          </p>
+        </div>
+      )}
 
       {/* Side-by-side result cards — compare mode only */}
       {compareMode && (
@@ -258,15 +295,18 @@ export default function F1Scores({ results }) {
               .flatMap(({ algo, name, color, pillClass }) =>
                 classes.map(cls => {
                   const f1 = algo?.per_class_f1?.[cls]
+                  const isZero = f1 === 0 || f1 === null
                   return (
-                    <tr key={name + cls}>
+                    <tr key={name + cls} style={isZero ? { background: 'rgba(216,90,48,0.07)' } : {}}>
                       <td style={{ color }}>{name}</td>
                       <td>{cls}</td>
                       <td>{algo?.precision?.toFixed(3) ?? '—'}</td>
                       <td>{algo?.recall?.toFixed(3) ?? '—'}</td>
-                      <td style={{ color }}>{f1?.toFixed(3) ?? '—'}</td>
+                      <td style={{ color: isZero ? '#D85A30' : color }}>{f1?.toFixed(3) ?? '—'}</td>
                       <td>
-                        {f1 != null && f1 >= 0.8
+                        {isZero
+                          ? <span className="pill" style={{ background: 'rgba(216,90,48,0.25)', color: '#D85A30' }}>Never predicted</span>
+                          : f1 != null && f1 >= 0.8
                           ? <span className={`pill ${pillClass}`}>Good</span>
                           : f1 != null
                           ? <span className="pill" style={{ background: 'var(--surface2)', color: 'var(--text3)' }}>Low</span>

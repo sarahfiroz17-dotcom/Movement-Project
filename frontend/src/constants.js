@@ -26,6 +26,6 @@ export const TABS_ANALYSIS = [
   'Map view', 'Cluster graphs', 'Time series', 'F1 scores', 'Feature importance',
 ]
 export const TABS_ENV = [
-  'Map view', 'Env profiles', 'Score over time', 'Algorithm comparison', 'Feature importance',
+  'Map view', 'Env factors', 'Env profiles', 'Score over time', 'Algorithm comparison', 'Feature importance',
 ]
 export const TABS_ACCOUNT = ['My datasets', 'History', 'Docs']

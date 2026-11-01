@@ -150,21 +150,41 @@ class BC_A29_SpeedAltitudeRules(BaseAlgorithm):
     service_id = 6; category = "A_linear"; library = "numpy"; animals = ["all"]
     description = "Domain rules: speed/altitude percentile thresholds → states"
 
+    # Species-aware absolute speed thresholds (m/s).
+    # Percentile-of-this-dataset ignores that migratory birds are fast in general;
+    # using absolute thresholds keeps labels ecologically meaningful across species.
+    _SPECIES_THRESHOLDS = {
+        "african cuckoo":      (0.05, 0.3, 3.0),
+        "common cuckoo":       (0.05, 0.3, 3.0),
+        "white stork":         (0.1,  0.5, 4.0),
+        "osprey":              (0.1,  0.4, 5.0),
+        "lesser spotted eagle":(0.1,  0.5, 4.5),
+        "elephant":            (0.05, 0.3, 1.2),
+        "buffalo":             (0.05, 0.2, 1.0),
+        "zebra":               (0.1,  0.5, 2.0),
+        "lion":                (0.05, 0.4, 2.5),
+    }
+    _DEFAULT_THRESHOLDS = (0.05, 0.3, 2.0)  # resting / foraging / traveling
+
     def __init__(self):
         super().__init__()
-        self.sp_ = None; self.al_ = None
+        self.sp_ = None; self.al_ = None; self._species_thresholds = None
 
     def fit(self, X, y=None):
-        self.sp_ = np.percentile(X[:, 0], [25, 60])
+        from vebita_framework.services.s3_environment.sarah_algorithms import get_current_species
+        species_key = get_current_species().lower().strip()
+        thresholds = self._SPECIES_THRESHOLDS.get(species_key, self._DEFAULT_THRESHOLDS)
+        self.sp_ = list(thresholds)
         self.al_ = np.percentile(X[:, 1], 50)
         self.is_fitted = True; return self
 
     def predict(self, X):
         sp, al = X[:, 0], X[:, 1]
         labels = np.zeros(len(X), dtype=int)
-        labels[(sp >= self.sp_[0]) & (sp < self.sp_[1])] = 1
-        labels[(sp >= self.sp_[1]) & (al < self.al_)] = 2
-        labels[(sp >= self.sp_[0]) & (al >= self.al_)] = 3
+        low, mid, high = self.sp_[0], self.sp_[1], self.sp_[2]
+        labels[(sp >= low) & (sp < mid)]                 = 1   # Foraging
+        labels[(sp >= mid) & (sp < high) & (al < self.al_)] = 2   # Traveling
+        labels[(sp >= high) | ((sp >= mid) & (al >= self.al_))] = 3   # Migrating
         return labels.astype(float)
 
 
@@ -273,7 +293,7 @@ class BC_C63_KNN7(BaseAlgorithm):
         super().__init__()
 
     def fit(self, X, y=None):
-        Xs, ys = _subsample(X, _y(y, len(X)), max_n=500)
+        Xs, ys = _subsample(X, _y(y, len(X)), max_n=5000)
         self.Xtr_ = Xs; self.ytr_ = ys
         self.classes_ = np.unique(ys)
         self.k_ = min(7, len(Xs) - 1)
@@ -501,32 +521,34 @@ class BC_E83_LSTM(BaseAlgorithm):
 
     def fit(self, X, y=None):
         y_ = _y(y, len(X)); K = len(np.unique(y_)); self.K_ = K
-        MAX_TRAIN = 2000
-        if len(X) > MAX_TRAIN:
-            step = int(np.ceil(len(X) / MAX_TRAIN))
-            X_fit = X[::step]; y_fit = y_[::step]
-        else:
-            X_fit = X; y_fit = y_
-        n, h = X_fit.shape[1], self.hidden; s = 0.1; np.random.seed(42)
-        self.Wf = np.random.randn(n + h, h) * s; self.bf = np.zeros(h)
-        self.Wi = np.random.randn(n + h, h) * s; self.bi = np.zeros(h)
-        self.Wc = np.random.randn(n + h, h) * s; self.bc = np.zeros(h)
-        self.Wo = np.random.randn(n + h, h) * s; self.bo = np.zeros(h)
-        self.Wy = np.random.randn(h, K) * s;     self.by = np.zeros(K)
+        # Use contiguous sliding windows instead of striding over the whole track,
+        # which destroys the temporal context the LSTM is supposed to exploit.
+        SEQ_LEN = 30; MAX_SEQS = 500
+        n = len(X); n_seqs = min(MAX_SEQS, max(1, n - SEQ_LEN))
+        starts = np.random.RandomState(42).choice(max(1, n - SEQ_LEN), n_seqs, replace=n_seqs > n - SEQ_LEN)
+        X_seqs = [X[s:s + SEQ_LEN] for s in starts]
+        y_seqs = [y_[s:s + SEQ_LEN] for s in starts]
+        h_dim = self.hidden; n_feat = X.shape[1]; s = 0.1; np.random.seed(42)
+        self.Wf = np.random.randn(n_feat + h_dim, h_dim) * s; self.bf = np.zeros(h_dim)
+        self.Wi = np.random.randn(n_feat + h_dim, h_dim) * s; self.bi = np.zeros(h_dim)
+        self.Wc = np.random.randn(n_feat + h_dim, h_dim) * s; self.bc = np.zeros(h_dim)
+        self.Wo = np.random.randn(n_feat + h_dim, h_dim) * s; self.bo = np.zeros(h_dim)
+        self.Wy = np.random.randn(h_dim, K) * s;              self.by = np.zeros(K)
         for _ in range(self.epochs):
-            ht, ct = np.zeros(h), np.zeros(h)
-            for t in range(len(X_fit)):
-                c = np.concatenate([X_fit[t], ht])
-                f = _sigmoid(c @ self.Wf + self.bf)
-                i = _sigmoid(c @ self.Wi + self.bi)
-                ct_ = np.tanh(c @ self.Wc + self.bc)
-                ct = f * ct + i * ct_
-                o = _sigmoid(c @ self.Wo + self.bo)
-                ht = o * np.tanh(ct)
-                p = _softmax((ht @ self.Wy + self.by).reshape(1, -1)).ravel()
-                e = p.copy(); e[y_fit[t] % K] -= 1
-                self.Wy -= self.lr * np.outer(ht, e)
-                self.by -= self.lr * e
+            for X_seq, y_seq in zip(X_seqs, y_seqs):
+                ht, ct = np.zeros(h_dim), np.zeros(h_dim)
+                for t in range(len(X_seq)):
+                    c = np.concatenate([X_seq[t], ht])
+                    f = _sigmoid(c @ self.Wf + self.bf)
+                    i = _sigmoid(c @ self.Wi + self.bi)
+                    ct_ = np.tanh(c @ self.Wc + self.bc)
+                    ct = f * ct + i * ct_
+                    o = _sigmoid(c @ self.Wo + self.bo)
+                    ht = o * np.tanh(ct)
+                    p = _softmax((ht @ self.Wy + self.by).reshape(1, -1)).ravel()
+                    e = p.copy(); e[y_seq[t] % K] -= 1
+                    self.Wy -= self.lr * np.outer(ht, e)
+                    self.by -= self.lr * e
         self.is_fitted = True; return self
 
     def predict(self, X):
@@ -566,6 +588,29 @@ class BC_E87_TCN(BaseAlgorithm):
             in_ch = self.nf
         self.Wout_ = np.random.randn(self.nf, K) * 0.1
         self.bout_ = np.zeros(K)
+
+        # Train: subsample then run 20 epochs of stochastic gradient descent on the
+        # TCN output logits. Without this the weights stay random and accuracy is ~25%.
+        lr = 0.01; n_epochs = 20
+        Xs, ys = _subsample(X, y_, max_n=10000)
+        n = len(Xs)
+        for _ in range(n_epochs):
+            a = Xs
+            for l, W in enumerate(self.layers_):
+                d = 2 ** l; nt = len(a)
+                idx = [np.clip(np.arange(nt) - d * (self.ks - 1 - k), 0, None) for k in range(self.ks)]
+                a_shift = [a[ix] for ix in idx]
+                out = np.zeros((nt, self.nf))
+                for fi in range(self.nf):
+                    acc = np.zeros(nt)
+                    for k in range(self.ks):
+                        acc += a_shift[k] @ W[fi, :, k]
+                    out[:, fi] = acc
+                a = _relu(out)
+            probs = _softmax(a @ self.Wout_ + self.bout_)
+            dL = _ce_grad(probs, ys, K)
+            self.Wout_ -= lr * a.T @ dL
+            self.bout_ -= lr * dL.mean(0)
         self.is_fitted = True; return self
 
     def predict(self, X):

@@ -1,5 +1,7 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { CLUSTER_COLORS } from '../constants.js'
+
+const STAGE_COLORS = ['#378ADD', '#5DCAA5', '#EF9F27', '#D85A30']
 
 function scoreColor(t, variant) {
   const v = Math.max(0, Math.min(1, t))
@@ -15,7 +17,7 @@ function scoreColor(t, variant) {
   return `rgb(${r},${g},${b})`
 }
 
-function AlgoMap({ results, which }) {
+function AlgoMap({ results, which, stageMode }) {
   const mapRef     = useRef(null)
   const leafletRef = useRef(null)
 
@@ -51,9 +53,12 @@ function AlgoMap({ results, which }) {
       const { lats, lons } = results
       if (!lats?.length) return
 
-      const scores = algo?.scores || []
-      const preds  = algo?.predictions || []
-      const bounds = []
+      const scores     = algo?.scores || []
+      const preds      = algo?.predictions || []
+      const stages     = results.stages || []
+      const labelNames = results.label_names || []
+      const envFactors = results.env_factors
+      const bounds     = []
 
       const MAX_MAP_POINTS = 5000
       const n    = lats.length
@@ -70,73 +75,90 @@ function AlgoMap({ results, which }) {
       }
 
       if (isRegression) {
-        idxs.forEach(i => {
-          const score = scores[i] ?? 0
+        idxs.forEach((i) => {
+          const score      = scores[i]
+          if (score == null) return  // training fix — skip coloured dot
+          const stageIdx   = stages[i] ?? -1
+          const stageName  = stageIdx >= 0 && labelNames[stageIdx] ? labelNames[stageIdx] : ''
+          const stageColor = stageIdx >= 0 ? STAGE_COLORS[stageIdx % STAGE_COLORS.length] : '#888'
+
+          // Top env factor for popup
+          let topFactor = ''
+          if (envFactors?.names && envFactors.values?.[i]) {
+            const row = envFactors.values[i]
+            if (row) {
+              let topIdx = 0, topVal = -1
+              for (let j = 0; j < row.length; j++) {
+                if (row[j] > topVal) { topVal = row[j]; topIdx = j }
+              }
+              topFactor = `${envFactors.names[topIdx].replace(/_/g, ' ')} (${topVal.toFixed(2)})`
+            }
+          }
+
           bounds.push([lats[i], lons[i]])
-          const circle = Lv.circleMarker([lats[i], lons[i]], {
-            radius: 5,
-            fillColor: scoreColor(score, which),
+          const dotColor = stageMode && stageIdx >= 0 ? stageColor : scoreColor(score, which)
+
+          Lv.circleMarker([lats[i], lons[i]], {
+            radius: 5, fillColor: dotColor,
             color: 'transparent', weight: 0, fillOpacity: 0.85,
-          })
-          circle.bindPopup(
-            `<div style="font-size:12px;line-height:1.6;min-width:140px">
+          }).bindPopup(
+            `<div style="font-size:12px;line-height:1.7;min-width:160px">
               <b>Fix #${i + 1}</b><br/>
               <span style="color:${accentColor}">${name}: ${score.toFixed(3)}</span><br/>
+              ${topFactor ? `<span style="color:#aaa">Top factor: ${topFactor}</span><br/>` : ''}
+              ${stageName ? `<span style="color:${stageColor}">● ${stageName}</span><br/>` : ''}
               Lat: ${lats[i].toFixed(4)} · Lon: ${lons[i].toFixed(4)}
             </div>`,
             { className: 'dark-popup' }
-          )
-          circle.addTo(map)
+          ).addTo(map)
         })
       } else {
-        const labelNames = results.label_names || []
         idxs.forEach(i => {
-          const cluster = preds[i] ?? 0
+          const cluster = preds[i]
+          if (cluster == null) return  // training fix — skip
           const color   = CLUSTER_COLORS[cluster % CLUSTER_COLORS.length]
           const label   = labelNames[cluster] || `Cluster ${cluster}`
           bounds.push([lats[i], lons[i]])
-          const circle = Lv.circleMarker([lats[i], lons[i]], {
+          Lv.circleMarker([lats[i], lons[i]], {
             radius: 4, fillColor: color, color: 'transparent', weight: 0, fillOpacity: 0.85,
-          })
-          circle.bindPopup(
+          }).bindPopup(
             `<div style="font-size:12px;line-height:1.6;min-width:140px">
               <b>Fix #${i + 1}</b><br/>
               <span style="color:${accentColor}">${name}: ${label}</span><br/>
               Lat: ${lats[i].toFixed(4)} · Lon: ${lons[i].toFixed(4)}
             </div>`,
             { className: 'dark-popup' }
-          )
-          circle.addTo(map)
+          ).addTo(map)
         })
       }
 
-      if (bounds.length > 0) {
+      if (trackPoints.length > 0) {
         const startIcon = Lv.divIcon({
           html: `<div style="width:10px;height:10px;background:${accentColor};border-radius:50%;border:2px solid #04342C"></div>`,
           iconSize: [10, 10], className: '',
         })
-        Lv.marker(bounds[0], { icon: startIcon }).bindTooltip('Start').addTo(map)
-        const fitBounds = bounds.length > 300 ? bounds.slice(0, 300) : bounds
-        map.fitBounds(fitBounds, { padding: [20, 20], maxZoom: 11 })
+        Lv.marker(trackPoints[0], { icon: startIcon }).bindTooltip('Start').addTo(map)
+        const fitPoints = trackPoints.length > 500 ? trackPoints.slice(0, 500) : trackPoints
+        map.fitBounds(fitPoints, { padding: [20, 20], maxZoom: 11 })
       }
     })
     return () => {}
-  }, [results, which])
+  }, [results, which, stageMode])
 
-  // Stats
-  const f1  = algo?.f1
-  const rt  = algo?.runtime
-
-  // Cluster legend (classification only)
   const labelNames = results?.label_names || []
-  const preds      = algo?.predictions || []
-  const clusterCounts = preds.reduce((acc, p) => { acc[p] = (acc[p] || 0) + 1; return acc }, {})
+  const predsArr   = algo?.predictions || []
+  const clusterCounts = predsArr.reduce((acc, p) => { acc[p] = (acc[p] || 0) + 1; return acc }, {})
   const legendItems = !isRegression
     ? (labelNames.length > 0
         ? labelNames.map((nm, i) => ({ label: nm, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length] }))
         : Object.entries(clusterCounts).sort((a,b)=>b[1]-a[1]).slice(0,5)
             .map(([k,ct]) => ({ label: `Cluster ${k} (${ct})`, color: CLUSTER_COLORS[+k % CLUSTER_COLORS.length] })))
     : []
+
+  const stageLegendNames = results?.label_names || ['Resting', 'Foraging', 'Traveling', 'Migrating']
+
+  const f1 = algo?.f1
+  const rt = algo?.runtime
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0,
@@ -156,16 +178,12 @@ function AlgoMap({ results, which }) {
                 F1 <b style={{ color: accentColor }}>{f1.toFixed(3)}</b>
               </span>
             )}
-            {rt != null && (
-              <span style={{ fontSize: 11, color: 'var(--text3)' }}>
-                {rt.toFixed(2)}s
-              </span>
-            )}
+            {rt != null && <span style={{ fontSize: 11, color: 'var(--text3)' }}>{rt.toFixed(2)}s</span>}
           </div>
         </div>
 
-        {/* Regression gradient bar */}
-        {isRegression && (
+        {/* Regression: show gradient bar OR stage legend depending on mode */}
+        {isRegression && !stageMode && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 10, color: 'var(--text3)' }}>Low</span>
             <div style={{ flex: 1, height: 5, borderRadius: 3,
@@ -173,6 +191,17 @@ function AlgoMap({ results, which }) {
                             ? 'linear-gradient(to right, rgb(20,150,120), rgb(100,230,200))'
                             : 'linear-gradient(to right, rgb(80,60,180), rgb(240,100,240))' }} />
             <span style={{ fontSize: 10, color: 'var(--text3)' }}>High</span>
+          </div>
+        )}
+
+        {isRegression && stageMode && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px' }}>
+            {stageLegendNames.map((lbl, i) => (
+              <div key={lbl} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--text2)' }}>
+                <div style={{ width: 7, height: 7, borderRadius: '50%', background: STAGE_COLORS[i % STAGE_COLORS.length], flexShrink: 0 }} />
+                {lbl}
+              </div>
+            ))}
           </div>
         )}
 
@@ -202,11 +231,9 @@ export default function SplitMapView({ results }) {
     </div>
   )
 
-  const nameA = results.algo_a?.name?.replace(/^(Beh|Env)\s/, '') || 'Algorithm A'
-  const nameB = results.algo_b?.name?.replace(/^(Beh|Env)\s/, '') || 'Algorithm B'
   const isRegression = results.algo_a?.service_type === 'regression'
+  const [stageMode, setStageMode] = useState(true)
 
-  // Agreement / difference stats
   const predsA = results.algo_a?.predictions || []
   const predsB = results.algo_b?.predictions || []
   const agree  = predsA.filter((v, i) => v === predsB[i]).length
@@ -223,7 +250,7 @@ export default function SplitMapView({ results }) {
               ? (results.algo_a?.runtime != null ? results.algo_a.runtime.toFixed(2) + 's' : '—')
               : (results.algo_a?.f1 != null ? results.algo_a.f1.toFixed(3) : '—')}
           </div>
-          <div className="mcard-label">{nameA} {isRegression ? 'runtime' : 'F1'}</div>
+          <div className="mcard-label">{results.algo_a?.name?.replace(/^(Beh|Env)\s/, '') || 'A'} {isRegression ? 'runtime' : 'F1'}</div>
         </div>
         <div className="mcard">
           <div className="mcard-val purple">
@@ -231,10 +258,10 @@ export default function SplitMapView({ results }) {
               ? (results.algo_b?.runtime != null ? results.algo_b.runtime.toFixed(2) + 's' : '—')
               : (results.algo_b?.f1 != null ? results.algo_b.f1.toFixed(3) : '—')}
           </div>
-          <div className="mcard-label">{nameB} {isRegression ? 'runtime' : 'F1'}</div>
+          <div className="mcard-label">{results.algo_b?.name?.replace(/^(Beh|Env)\s/, '') || 'B'} {isRegression ? 'runtime' : 'F1'}</div>
         </div>
         <div className="mcard">
-          <div className="mcard-val">{(results.n_test || 0).toLocaleString()}</div>
+          <div className="mcard-val">{(results.n_total || results.n_test || 0).toLocaleString()}</div>
           <div className="mcard-label">GPS fixes</div>
         </div>
         <div className="mcard">
@@ -254,10 +281,27 @@ export default function SplitMapView({ results }) {
         </div>
       </div>
 
+      {/* Stage mode toggle — S3 only */}
+      {isRegression && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 11, color: 'var(--text3)' }}>Colour by:</span>
+          <button onClick={() => setStageMode(false)} style={{
+            fontSize: 11, padding: '3px 10px', borderRadius: 4, cursor: 'pointer', border: 'none',
+            background: !stageMode ? 'var(--accent)' : 'var(--surface2)',
+            color: !stageMode ? '#000' : 'var(--text2)',
+          }}>Env score</button>
+          <button onClick={() => setStageMode(true)} style={{
+            fontSize: 11, padding: '3px 10px', borderRadius: 4, cursor: 'pointer', border: 'none',
+            background: stageMode ? '#EF9F27' : 'var(--surface2)',
+            color: stageMode ? '#000' : 'var(--text2)',
+          }}>Movement stage</button>
+        </div>
+      )}
+
       {/* Split maps */}
       <div style={{ display: 'flex', gap: 10, height: 460 }}>
-        <AlgoMap results={results} which="a" />
-        <AlgoMap results={results} which="b" />
+        <AlgoMap results={results} which="a" stageMode={stageMode} />
+        <AlgoMap results={results} which="b" stageMode={stageMode} />
       </div>
 
     </div>

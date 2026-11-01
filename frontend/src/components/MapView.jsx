@@ -19,6 +19,8 @@ function scoreColorB(t) {
   return `rgb(${r},${g},${b})`
 }
 
+const STAGE_COLORS = ['#378ADD', '#5DCAA5', '#EF9F27', '#D85A30']
+
 export default function MapView({ results }) {
   const mapRef     = useRef(null)
   const leafletRef = useRef(null)
@@ -27,6 +29,7 @@ export default function MapView({ results }) {
   const compareMode  = results?.compareMode
   const [showA, setShowA] = useState(true)
   const [showB, setShowB] = useState(true)
+  const [stageMode, setStageMode] = useState(true)    // S3 only: colour by stage vs env score
 
   const nameA = results?.algo_a?.name?.replace(/^(Beh|Env)\s/, '') || 'Algorithm A'
   const nameB = results?.algo_b?.name?.replace(/^(Beh|Env)\s/, '') || 'Algorithm B'
@@ -83,64 +86,78 @@ export default function MapView({ results }) {
 
       if (isRegression) {
         // Small lat/lon nudge so A and B dots sit side-by-side instead of stacking
-        // 0.0003 degrees ≈ 30 m at mid-latitudes — visible at zoom 10+, negligible at zoom 7
         const OFFSET = 0.0003
         const both = showA && showB
+        const envFactors  = results.env_factors
+        const stages      = results.stages || []
+        const labelNames  = results.label_names || []
 
-        idxs.forEach(i => {
-          const scoreA = scoresAFull[i] ?? 0
-          const scoreB = scoresBFull[i] ?? 0
+        idxs.forEach((i) => {
+          const scoreA = scoresAFull[i]
+          const scoreB = scoresBFull[i]
           const lat = lats[i], lon = lons[i]
           bounds.push([lat, lon])
 
-          if (showA) {
-            // When both visible: shift A slightly left (west)
-            const aLon = both ? lon - OFFSET : lon
-            const circle = Lv.circleMarker([lat, aLon], {
-              radius: 5,
-              fillColor: scoreColorA(scoreA),
-              color: 'transparent', weight: 0, fillOpacity: 0.85,
-            })
-            circle.bindPopup(
-              `<div style="font-size:12px;line-height:1.6;min-width:160px">
-                <b>Fix #${i + 1}</b><br/>
-                <span style="color:#5DCAA5">A — ${nameA}: ${scoreA.toFixed(3)}</span><br/>
-                Lat: ${lat.toFixed(4)} · Lon: ${lon.toFixed(4)}
-              </div>`,
-              { className: 'dark-popup' }
-            )
-            circle.addTo(map)
+          // null means this fix was in the training set — skip coloured dot
+          const hasA = scoreA != null
+          const hasB = scoreB != null
+
+          // Stage for this fix — indexed by i (position in full-track array)
+          const stageIdx  = stages[i] ?? -1
+          const stageName = stageIdx >= 0 && labelNames[stageIdx] ? labelNames[stageIdx] : ''
+          const stageColor = stageIdx >= 0 ? STAGE_COLORS[stageIdx % STAGE_COLORS.length] : '#888'
+
+          // Top env factor for popup
+          let topFactor = ''
+          if (envFactors?.names && envFactors.values?.[i]) {
+            const row = envFactors.values[i]
+            if (row) {
+              let topIdx = 0, topVal = -1
+              for (let j = 0; j < row.length; j++) {
+                if (row[j] > topVal) { topVal = row[j]; topIdx = j }
+              }
+              topFactor = `${envFactors.names[topIdx].replace(/_/g, ' ')} (${topVal.toFixed(2)})`
+            }
           }
 
-          if (showB) {
-            // When both visible: shift B slightly right (east)
-            const bLon = both ? lon + OFFSET : lon
-            const circle = Lv.circleMarker([lat, bLon], {
-              radius: 5,
-              fillColor: scoreColorB(scoreB),
+          const popupHtml = `<div style="font-size:12px;line-height:1.7;min-width:180px">
+            <b>Fix #${i + 1}</b><br/>
+            ${hasA ? `<span style="color:#5DCAA5">A — ${nameA}: ${scoreA.toFixed(3)}</span><br/>` : '<span style="color:var(--text3)">Training fix</span><br/>'}
+            ${topFactor ? `<span style="color:#aaa">Top factor: ${topFactor}</span><br/>` : ''}
+            ${stageName ? `<span style="color:${stageColor}">● ${stageName}</span><br/>` : ''}
+            Lat: ${lat.toFixed(4)} · Lon: ${lon.toFixed(4)}
+          </div>`
+
+          if (showA && hasA) {
+            const aLon = both ? lon - OFFSET : lon
+            const dotColor = stageMode && stageIdx >= 0 ? stageColor : scoreColorA(scoreA)
+            Lv.circleMarker([lat, aLon], {
+              radius: 5, fillColor: dotColor,
               color: 'transparent', weight: 0, fillOpacity: 0.85,
-            })
-            circle.bindPopup(
-              `<div style="font-size:12px;line-height:1.6;min-width:160px">
-                <b>Fix #${i + 1}</b><br/>
-                <span style="color:#a080f0">B — ${nameB}: ${scoreB.toFixed(3)}</span><br/>
-                Lat: ${lat.toFixed(4)} · Lon: ${lon.toFixed(4)}
-              </div>`,
-              { className: 'dark-popup' }
-            )
-            circle.addTo(map)
+            }).bindPopup(popupHtml, { className: 'dark-popup' }).addTo(map)
+          }
+
+          if (showB && hasB) {
+            const bLon = both ? lon + OFFSET : lon
+            const dotColor = stageMode && stageIdx >= 0 ? stageColor : scoreColorB(scoreB)
+            Lv.circleMarker([lat, bLon], {
+              radius: 5, fillColor: dotColor,
+              color: 'transparent', weight: 0, fillOpacity: 0.85,
+            }).bindPopup(popupHtml, { className: 'dark-popup' }).addTo(map)
           }
         })
 
       } else {
-        // Non-regression: colour by algo_a clusters as before
+        // Non-regression (S6): colour by predicted cluster; skip training fixes (null)
         idxs.forEach(i => {
-          const clusterA = predsAFull[i] ?? 0
-          const clusterB = predsBFull[i] ?? 0
+          const clusterA = predsAFull[i]
+          const clusterB = predsBFull[i]
+          // null = training fix — show nothing (track line already drawn)
+          if (clusterA == null) return
           const color    = CLUSTER_COLORS[clusterA % CLUSTER_COLORS.length]
           const match    = clusterA === clusterB
           const popupA   = results.label_names?.[clusterA] || `Cluster ${clusterA}`
-          const popupB   = results.label_names?.[clusterB] || `Cluster ${clusterB}`
+          const popupB   = clusterB != null ? (results.label_names?.[clusterB] || `Cluster ${clusterB}`) : '—'
 
           const circle = Lv.circleMarker([lats[i], lons[i]], {
             radius: 4, fillColor: color, color: match ? color : '#ffffff',
@@ -160,21 +177,19 @@ export default function MapView({ results }) {
         })
       }
 
-      // Start/end markers
-      if (bounds.length > 0) {
+      // Start/end markers — fit to full track so entire route is visible
+      if (trackPoints.length > 0) {
         const startIcon = Lv.divIcon({ html: '<div style="width:10px;height:10px;background:#5DCAA5;border-radius:50%;border:2px solid #04342C"></div>', iconSize: [10, 10], className: '' })
         const endIcon   = Lv.divIcon({ html: '<div style="width:10px;height:10px;background:#7F77DD;border-radius:50%;border:2px solid #26215C"></div>', iconSize: [10, 10], className: '' })
-        Lv.marker(bounds[0], { icon: startIcon }).bindTooltip('Start').addTo(map)
-        Lv.marker(bounds[bounds.length - 1], { icon: endIcon }).bindTooltip('Latest').addTo(map)
-        // Fit to first 300 points so the initial view zooms into the start of the route
-        // rather than showing the whole multi-year migration at zoom 5 where dots vanish
-        const fitBounds = bounds.length > 300 ? bounds.slice(0, 300) : bounds
-        map.fitBounds(fitBounds, { padding: [30, 30], maxZoom: 11 })
+        Lv.marker(trackPoints[0], { icon: startIcon }).bindTooltip('Start').addTo(map)
+        Lv.marker(trackPoints[trackPoints.length - 1], { icon: endIcon }).bindTooltip('Latest').addTo(map)
+        const fitPoints = trackPoints.length > 500 ? trackPoints.slice(0, 500) : trackPoints
+        map.fitBounds(fitPoints, { padding: [30, 30], maxZoom: 11 })
       }
     })
 
     return () => {}
-  }, [results, showA, showB])
+  }, [results, showA, showB, stageMode])
 
   const labelNames    = results?.label_names || []
   const predsA        = results?.algo_a?.predictions || []
@@ -203,7 +218,7 @@ export default function MapView({ results }) {
             <div className="mcard-label">{isRegression ? 'Env score' : 'Clusters found'}</div>
           </div>
           <div className="mcard">
-            <div className="mcard-val">{(results.n_test || 0).toLocaleString()}</div>
+            <div className="mcard-val">{(results.n_total || results.n_test || 0).toLocaleString()}</div>
             <div className="mcard-label">GPS fixes mapped</div>
           </div>
           <div className="mcard">
@@ -230,44 +245,76 @@ export default function MapView({ results }) {
             Movement map — GPS trajectory with {isRegression ? 'environmental score overlay' : 'cluster overlay'}
           </div>
           {results && isRegression && (
-            <div style={{ display: 'flex', gap: 20, alignItems: 'center', marginBottom: 8 }}>
-              {/* Checkbox A */}
-              <label style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', userSelect: 'none' }}>
-                <span style={{
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  width: 16, height: 16, borderRadius: 4, border: '2px solid #5DCAA5',
-                  background: showA ? '#5DCAA5' : 'transparent', flexShrink: 0,
-                  transition: 'background 0.15s',
-                }}>
-                  {showA && <svg width="10" height="8" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#0a0a10" strokeWidth="1.8" fill="none" strokeLinecap="round"/></svg>}
-                </span>
-                <input type="checkbox" checked={showA} onChange={e => setShowA(e.target.checked)}
-                       style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }} />
-                <span style={{ fontSize: 12, color: '#5DCAA5', fontWeight: 500 }}>{nameA}</span>
-                <div style={{ width: 32, height: 6, borderRadius: 3, background: 'linear-gradient(to right, rgb(20,150,120), rgb(100,230,200))' }} />
-              </label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {/* Mode toggle */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 11, color: 'var(--text3)' }}>Colour by:</span>
+                <button
+                  onClick={() => setStageMode(false)}
+                  style={{
+                    fontSize: 11, padding: '3px 10px', borderRadius: 4, cursor: 'pointer', border: 'none',
+                    background: !stageMode ? 'var(--accent)' : 'var(--surface2)',
+                    color: !stageMode ? '#000' : 'var(--text2)',
+                  }}>
+                  Env score
+                </button>
+                <button
+                  onClick={() => setStageMode(true)}
+                  style={{
+                    fontSize: 11, padding: '3px 10px', borderRadius: 4, cursor: 'pointer', border: 'none',
+                    background: stageMode ? '#EF9F27' : 'var(--surface2)',
+                    color: stageMode ? '#000' : 'var(--text2)',
+                  }}>
+                  Movement stage
+                </button>
+              </div>
 
-              {/* Checkbox B — only in compare mode */}
-              {compareMode && (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', userSelect: 'none' }}>
-                <span style={{
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  width: 16, height: 16, borderRadius: 4, border: '2px solid #a080f0',
-                  background: showB ? '#a080f0' : 'transparent', flexShrink: 0,
-                  transition: 'background 0.15s',
-                }}>
-                  {showB && <svg width="10" height="8" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#0a0a10" strokeWidth="1.8" fill="none" strokeLinecap="round"/></svg>}
-                </span>
-                <input type="checkbox" checked={showB} onChange={e => setShowB(e.target.checked)}
-                       style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }} />
-                <span style={{ fontSize: 12, color: '#a080f0', fontWeight: 500 }}>{nameB}</span>
-                <div style={{ width: 32, height: 6, borderRadius: 3, background: 'linear-gradient(to right, rgb(80,60,180), rgb(240,100,240))' }} />
-              </label>
+              {/* Env score legend */}
+              {!stageMode && (
+                <div style={{ display: 'flex', gap: 20, alignItems: 'center' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', userSelect: 'none' }}>
+                    <span style={{
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      width: 16, height: 16, borderRadius: 4, border: '2px solid #5DCAA5',
+                      background: showA ? '#5DCAA5' : 'transparent', flexShrink: 0,
+                    }}>
+                      {showA && <svg width="10" height="8" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#0a0a10" strokeWidth="1.8" fill="none" strokeLinecap="round"/></svg>}
+                    </span>
+                    <input type="checkbox" checked={showA} onChange={e => setShowA(e.target.checked)}
+                           style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }} />
+                    <span style={{ fontSize: 12, color: '#5DCAA5', fontWeight: 500 }}>{nameA}</span>
+                    <div style={{ width: 32, height: 6, borderRadius: 3, background: 'linear-gradient(to right, rgb(20,150,120), rgb(100,230,200))' }} />
+                  </label>
+                  {compareMode && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', userSelect: 'none' }}>
+                      <span style={{
+                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                        width: 16, height: 16, borderRadius: 4, border: '2px solid #a080f0',
+                        background: showB ? '#a080f0' : 'transparent', flexShrink: 0,
+                      }}>
+                        {showB && <svg width="10" height="8" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#0a0a10" strokeWidth="1.8" fill="none" strokeLinecap="round"/></svg>}
+                      </span>
+                      <input type="checkbox" checked={showB} onChange={e => setShowB(e.target.checked)}
+                             style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }} />
+                      <span style={{ fontSize: 12, color: '#a080f0', fontWeight: 500 }}>{nameB}</span>
+                      <div style={{ width: 32, height: 6, borderRadius: 3, background: 'linear-gradient(to right, rgb(80,60,180), rgb(240,100,240))' }} />
+                    </label>
+                  )}
+                  <span style={{ fontSize: 11, color: 'var(--text3)' }}>Low → High env score</span>
+                </div>
               )}
 
-              <span style={{ fontSize: 11, color: 'var(--text3)', marginLeft: 4 }}>
-                Low → High environmental score
-              </span>
+              {/* Stage legend */}
+              {stageMode && (
+                <div className="legend">
+                  {(results.label_names || ['Resting', 'Foraging', 'Traveling', 'Migrating']).map((lbl, i) => (
+                    <div key={lbl} className="leg-item">
+                      <div className="leg-dot" style={{ background: STAGE_COLORS[i % STAGE_COLORS.length] }} />
+                      {lbl}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {results && !isRegression && (

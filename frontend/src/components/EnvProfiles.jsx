@@ -25,8 +25,9 @@ export default function EnvProfiles({ results }) {
     </div>
   )
 
-  const scoresA = results.algo_a?.scores || []
-  const scoresB = results.algo_b?.scores || []
+  // Filter out nulls — full-track arrays now contain null for training fixes
+  const scoresA = (results.algo_a?.scores || []).filter(v => v != null)
+  const scoresB = (results.algo_b?.scores || []).filter(v => v != null)
   const nameA   = results.algo_a?.name?.replace(/^Env\s/, '') || 'Algorithm A'
   const nameB   = results.algo_b?.name?.replace(/^Env\s/, '') || 'Algorithm B'
   const compareMode = results?.compareMode
@@ -118,6 +119,43 @@ export default function EnvProfiles({ results }) {
   const sA = stats(scoresA)
   const sB = stats(scoresB)
 
+  // Auto-generated insight — based on variability, not absolute mean (scores are min-max normalised so mean is always ~0.4)
+  const insightLines = []
+  const stdA  = parseFloat(sA.std)
+  const minA  = parseFloat(sA.min)
+  const maxA  = parseFloat(sA.max)
+
+  if (!isNaN(stdA)) {
+    if (stdA > 0.2)
+      insightLines.push(`The score varies a lot across this route (std dev ${sA.std}), meaning the animal passes through zones with very different levels of environmental activity — watch for sharp peaks in the Score over time tab.`)
+    else if (stdA > 0.1)
+      insightLines.push(`The score fluctuates moderately (std dev ${sA.std}), meaning the animal encounters some environmental variation but conditions are broadly consistent along the route.`)
+    else
+      insightLines.push(`The score stays fairly flat (std dev ${sA.std}), meaning the animal experiences similar environmental conditions throughout — the habitat is likely uniform with no dramatic shifts.`)
+  }
+
+  if (!isNaN(minA) && !isNaN(maxA)) {
+    const range = (maxA - minA).toFixed(3)
+    insightLines.push(`Scores range from ${sA.min} to ${sA.max} (spread: ${range}). The histogram below shows how often the animal was in low vs. high scoring zones.`)
+  }
+
+  if (compareMode) {
+    const meanA = parseFloat(sA.mean)
+    const meanB = parseFloat(sB.mean)
+    const stdB  = parseFloat(sB.std)
+    const diff  = Math.abs(meanA - meanB)
+    if (!isNaN(meanA) && !isNaN(meanB)) {
+      if (diff < 0.03)
+        insightLines.push(`Both algorithms give very similar average scores (${sA.mean} vs ${sB.mean}), meaning they broadly agree on the overall level of environmental influence.`)
+      else if (diff > 0.08)
+        insightLines.push(`The two algorithms give noticeably different average scores (${sA.mean} vs ${sB.mean}) — they are weighting the environmental signals differently. Check the Algorithm comparison tab to see where they diverge most.`)
+    }
+    if (!isNaN(stdA) && !isNaN(stdB)) {
+      if (Math.abs(stdA - stdB) > 0.05)
+        insightLines.push(`Their variability also differs (${sA.std} vs ${sB.std}), meaning one algorithm produces more extreme highs and lows than the other.`)
+    }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
@@ -138,6 +176,14 @@ export default function EnvProfiles({ results }) {
             <div className="mcard" key="mxa"><div className="mcard-val">{sA.max}</div><div className="mcard-label">Max score</div></div>
           </>
         )}
+      </div>
+
+      {/* Auto-generated insight */}
+      <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
+        <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>
+        <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, margin: 0 }}>
+          {insightLines.join(' ')}
+        </p>
       </div>
 
       {/* Score distribution histogram */}

@@ -58,6 +58,25 @@ except ImportError:
 from core.base import BaseAlgorithm
 from core.registry import registry
 
+# Ordered names for the 12 columns returned by _env_features()
+ENV_FACTOR_NAMES = [
+    "terrain_ruggedness", "slope", "ndvi_proxy", "land_cover",
+    "wind_proxy", "temperature_proxy", "proximity_water", "solar_radiation",
+    "resource_score", "elevation_gradient", "habitat_boundary", "energy_expenditure",
+]
+
+# Set by main.py before running S3 algorithms so species-aware weights apply
+_CURRENT_SPECIES = "unknown"
+
+
+def set_current_species(species: str):
+    global _CURRENT_SPECIES
+    _CURRENT_SPECIES = species
+
+
+def get_current_species() -> str:
+    return _CURRENT_SPECIES
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HELPER: synthetic environmental features derived from movement data
@@ -72,26 +91,98 @@ def _subsample_env(X, y=None, max_n=2000, seed=42):
     return X[idx], (y[idx] if y is not None else None)
 
 
-def _env_score(X: np.ndarray) -> np.ndarray:
+def _env_score(X: np.ndarray, species: str = None) -> np.ndarray:
     """
-    Composite environmental intensity score built from raw movement features.
-    Uses unscaled magnitudes so the target has real variance even on standardised X.
-    Score = weighted sum of terrain ruggedness, speed variability, and altitude signal.
-    This gives the regression algorithms a meaningful, varying target to learn from.
+    Composite environmental intensity score built from all 12 proxy features.
+
+    Weights are derived from the absolute Pearson correlation of each feature
+    with energy expenditure (speed²) — the most ecologically grounded movement
+    cost signal available without external data. This means the score reflects
+    how strongly each factor co-varies with locomotion cost, which is a
+    defensible proxy for environmental influence on movement.
+
+    Species group adjusts the base weights to reflect known ecology:
+    - Birds weight altitude/terrain more (thermal soaring, migration altitude)
+    - Mammals weight terrain/water more (landscape navigation)
+    - Insects weight NDVI/resource more (foraging patch quality)
     """
     E = _env_features(X)
-    # terrain_ruggedness (col 0), wind_proxy/spd_std (col 4), energy (col 11)
-    terrain  = E[:, 0]
-    wind     = E[:, 4]
-    energy   = E[:, 11]
-    ndvi     = E[:, 2]
-    resource = E[:, 8]
-    raw = 0.3 * terrain + 0.2 * wind + 0.2 * energy + 0.15 * ndvi + 0.15 * resource
-    # Normalise to 0-1 range using training-set statistics stored on first call
+    energy = E[:, 11]  # energy expenditure = speed² — our anchor signal
+
+    # Compute absolute correlation of each of the 12 features with energy
+    corrs = np.zeros(12)
+    for i in range(12):
+        col = E[:, i]
+        col_std = col.std()
+        energy_std = energy.std()
+        if col_std > 1e-9 and energy_std > 1e-9:
+            corrs[i] = abs(np.corrcoef(col, energy)[0, 1])
+        else:
+            corrs[i] = 0.0
+
+    # Species-group multipliers — scale base correlations by ecological priority
+    sp = species if species is not None else _CURRENT_SPECIES
+    group = _species_group(sp)
+    multipliers = _species_multipliers(group)
+    adjusted = corrs * multipliers
+
+    # Normalise to sum to 1 so result stays in interpretable range
+    total = adjusted.sum()
+    weights = adjusted / total if total > 1e-9 else np.ones(12) / 12
+
+    raw = E.dot(weights)
+
     rng = raw.max() - raw.min()
     if rng < 1e-9:
         return np.zeros(len(raw))
     return ((raw - raw.min()) / rng).astype(float)
+
+
+def _species_group(species: str) -> str:
+    """Classify a species name string into a broad ecological group."""
+    s = species.lower()
+    birds = ["stork", "kite", "cuckoo", "guillemot", "swan", "eagle",
+             "hawk", "falcon", "heron", "crane", "goose", "duck",
+             "sparrow", "warbler", "gull", "tern", "bee-eater"]
+    mammals = ["wolf", "bear", "elk", "deer", "gazelle", "lion",
+               "cheetah", "leopard", "buffalo", "elephant", "jackal",
+               "lynx", "caribou", "moose"]
+    insects = ["bee", "butterfly", "moth", "dragonfly", "beetle"]
+    if any(b in s for b in birds):
+        return "bird"
+    if any(m in s for m in mammals):
+        return "mammal"
+    if any(i in s for i in insects):
+        return "insect"
+    return "unknown"
+
+
+def _species_multipliers(group: str) -> np.ndarray:
+    """
+    Per-factor weight multipliers by species group.
+    Indices match ENV_FACTOR_NAMES:
+    0=terrain_rug, 1=slope, 2=ndvi, 3=land_cover,
+    4=wind, 5=temp, 6=water, 7=solar,
+    8=resource, 9=elev_grad, 10=hab_boundary, 11=energy
+    """
+    if group == "bird":
+        # Birds: terrain and altitude-related factors dominate (thermal soaring,
+        # migration corridors, altitude-dependent temperature)
+        return np.array([1.4, 1.3, 1.0, 0.8,
+                         1.2, 1.3, 0.8, 1.1,
+                         0.9, 1.3, 1.0, 1.2])
+    if group == "mammal":
+        # Mammals: terrain navigation and water proximity dominate
+        return np.array([1.3, 1.2, 1.0, 1.1,
+                         0.9, 1.0, 1.4, 0.8,
+                         1.1, 1.2, 1.1, 1.2])
+    if group == "insect":
+        # Insects: vegetation quality and resource patches dominate
+        return np.array([0.8, 0.7, 1.5, 1.2,
+                         0.7, 0.9, 1.2, 1.3,
+                         1.5, 0.7, 1.1, 1.0])
+    # Unknown: equal multipliers — pure correlation-based weights
+    return np.ones(12)
 
 
 def _env_features(X: np.ndarray) -> np.ndarray:
@@ -100,6 +191,11 @@ def _env_features(X: np.ndarray) -> np.ndarray:
     Columns: terrain_ruggedness, slope, ndvi_proxy, land_cover,
              wind_proxy, temperature_proxy, proximity_water, solar_radiation,
              resource_score, elevation_gradient, habitat_boundary, energy_expenditure
+
+    Terrain ruggedness uses a rolling absolute difference (window=3) rather than
+    np.gradient to avoid the boundary artifact where the gradient at the first/last
+    point of a train or test split is influenced by the split cutoff rather than
+    the actual terrain. Rolling diff only looks at adjacent points.
     """
     speed    = X[:, 0]
     alt      = X[:, 1]
@@ -110,16 +206,23 @@ def _env_features(X: np.ndarray) -> np.ndarray:
     step     = X[:, 6]
     alt_mean = X[:, 7]
 
-    terrain_rug  = np.abs(np.gradient(alt))
+    # Rolling absolute altitude difference — boundary-safe terrain ruggedness
+    alt_f = alt.astype(float)
+    alt_diff = np.zeros(len(alt_f))
+    if len(alt_f) > 1:
+        alt_diff[1:] = np.abs(np.diff(alt_f))
+        alt_diff[0]  = alt_diff[1]  # repeat first interior value, not boundary artifact
+
+    terrain_rug  = alt_diff
     slope        = np.gradient(alt_mean)
     ndvi_proxy   = speed * (1 / (turn + 1))
     land_cover   = np.round(alt_mean / (alt_mean.max() + 1e-6) * 4).astype(float)
     wind_proxy   = spd_std
-    temp_proxy   = -alt / (alt.max() + 1e-6)
-    prox_water   = ((speed < np.percentile(speed, 25)) & (alt < np.percentile(alt, 25))).astype(float)
+    temp_proxy   = -alt_f / (alt_f.max() + 1e-6)
+    prox_water   = ((speed < np.percentile(speed, 25)) & (alt_f < np.percentile(alt_f, 25))).astype(float)
     solar        = straight * spd_mean
     resource     = 1 / (turn + 1)
-    elev_grad    = np.gradient(alt)
+    elev_grad    = np.gradient(alt_mean)
     hab_boundary = (turn > np.percentile(turn, 90)).astype(float)
     energy       = speed ** 2
 

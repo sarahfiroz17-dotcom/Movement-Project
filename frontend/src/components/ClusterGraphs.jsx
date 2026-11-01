@@ -55,7 +55,68 @@ function computeTurnHistogram(preds, turns, labelNames, clusterLabels, colors) {
   return { binLabels: binEdges.map(e => `${e}°`), datasets }
 }
 
-export default function ClusterGraphs({ results }) {
+// ── Auto-generated plain-English insight (S6 only) ───────────────────────────
+function generateBehaviourInsight({ clusterLabels, clusterVals, meanSpeedOrdered, totalAll, algo_a }) {
+  const sentences = []
+  const pct = i => Math.round((clusterVals[i] / totalAll) * 100)
+
+  // 1. Overall accuracy if available
+  const acc = algo_a?.accuracy
+  if (acc != null) {
+    if (acc > 0.85) {
+      sentences.push(`The algorithm classified behaviours with high accuracy (${(acc * 100).toFixed(1)}%), meaning the predicted movement stages are likely reliable.`)
+    } else if (acc > 0.6) {
+      sentences.push(`The algorithm achieved moderate accuracy (${(acc * 100).toFixed(1)}%), so the stage labels give a reasonable picture but some fixes may be misclassified.`)
+    } else {
+      sentences.push(`Classification accuracy is relatively low (${(acc * 100).toFixed(1)}%), so treat the stage breakdown as an approximation — the boundaries between behaviours may overlap.`)
+    }
+  }
+
+  // 2. Dominant behaviour
+  const maxIdx = clusterVals.indexOf(Math.max(...clusterVals))
+  const domLabel = clusterLabels[maxIdx]
+  const domPct   = pct(maxIdx)
+  const domSpeed = meanSpeedOrdered[maxIdx]
+
+  const STAGE_PLAIN = {
+    Resting:   'The animal spends most of its time resting — very little active movement detected.',
+    Foraging:  'The animal is mostly foraging — slow, wandering movement typical of searching for food.',
+    Traveling: 'The animal is predominantly traveling — sustained movement in a consistent direction.',
+    Migrating: 'The animal is in a migratory pattern — fast, long-distance, directional movement.',
+  }
+  const stagePlain = STAGE_PLAIN[domLabel] || `The most common behaviour is "${domLabel}" (${domPct}% of GPS fixes).`
+  sentences.push(stagePlain + (STAGE_PLAIN[domLabel] ? ` It accounts for ${domPct}% of the route.` : ''))
+
+  // 3. Speed interpretation
+  if (domSpeed != null) {
+    if (domSpeed < 0.3) {
+      sentences.push(`The average speed during this stage is very low (${domSpeed.toFixed(2)} m/s), consistent with resting or slow grazing.`)
+    } else if (domSpeed < 1.0) {
+      sentences.push(`The average speed during the dominant stage is ${domSpeed.toFixed(2)} m/s — typical of slow walking or exploratory movement.`)
+    } else {
+      sentences.push(`The average speed during the dominant stage is ${domSpeed.toFixed(2)} m/s, indicating active, purposeful travel.`)
+    }
+  }
+
+  // 4. Minority stages
+  const minorities = clusterLabels
+    .map((l, i) => ({ l, p: pct(i) }))
+    .filter((_, i) => i !== maxIdx && pct(i) > 5)
+  if (minorities.length > 0) {
+    const parts = minorities.map(m => `${m.l} (${m.p}%)`).join(', ')
+    sentences.push(`Other notable behaviours include ${parts}, suggesting the animal is not locked into a single activity.`)
+  }
+
+  // 5. Balance / fragmentation hint
+  const minPct = Math.min(...clusterVals.map((_, i) => pct(i)))
+  if (minPct > 15) {
+    sentences.push(`All behaviour types appear with reasonable frequency, indicating a varied behavioural repertoire across this recording period.`)
+  }
+
+  return sentences.join(' ')
+}
+
+export default function ClusterGraphs({ results, serviceId }) {
   if (!results) return (
     <div className="empty-state">
       <div style={{ fontSize: 32 }}>📊</div>
@@ -174,6 +235,22 @@ export default function ClusterGraphs({ results }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+      {/* Auto-generated insight — S6 only, at the top */}
+      {serviceId === 6 && (
+        <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
+          <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>
+          <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, margin: 0 }}>
+            {generateBehaviourInsight({
+              clusterLabels,
+              clusterVals,
+              meanSpeedOrdered,
+              totalAll,
+              algo_a,
+            })}
+          </p>
+        </div>
+      )}
 
       {/* Donut + mean speed row */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>

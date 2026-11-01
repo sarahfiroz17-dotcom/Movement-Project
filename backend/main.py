@@ -45,8 +45,15 @@ except Exception as e:
 
 try:
     from vebita_framework.services.s3_environment.sarah_algorithms import *
+    from vebita_framework.services.s3_environment.sarah_algorithms import (
+        _env_features, _env_score, ENV_FACTOR_NAMES, set_current_species,
+    )
     print("✓ Service 3 (Environmental Factors) loaded")
 except Exception as e:
+    _env_features = None
+    _env_score = None
+    ENV_FACTOR_NAMES = []
+    set_current_species = lambda s: None
     print(f"⚠ Service 3 failed to load: {e}")
 
 try:
@@ -391,43 +398,73 @@ def run_comparison(req: RunRequest):
 
     service_name = SERVICES.get(req.service_id, {}).get("name", "Unknown")
 
+    # For S3 and S6, pass current species to algorithm modules for species-aware behaviour
+    if req.service_id in (3, 6):
+        dataset_species = dict(row).get("species", "unknown") or "unknown"
+        set_current_species(dataset_species)
+
     # Load features
     try:
         X, y, label_names, lats, lons = load_dataset_features(row["filename"])
     except Exception as e:
         raise HTTPException(500, f"Failed to load dataset: {e}")
 
-    # Train/test split (temporal — no shuffling)
-    split = int(len(X) * 0.8)
-    X_train, X_test = X[:split], X[split:]
-    y_train = y[:split] if y is not None else None
-    y_test  = y[split:] if y is not None else None
-    lats_test = lats[split:].tolist() if lats is not None and len(lats) else []
-    lons_test = lons[split:].tolist() if lons is not None and len(lons) else []
+    # Train/test split:
+    # S3 regression: temporal (last 20%) to preserve temporal autocorrelation of env scores.
+    # S6 classification: stratified random split so all behaviour classes are represented
+    # in training, regardless of when they occur in the track.
+    if req.service_id == 6:
+        from sklearn.model_selection import train_test_split as _tts
+        n = len(X)
+        y_for_split = y if y is not None else np.zeros(n, dtype=int)
+        train_idx, test_idx = _tts(
+            np.arange(n), test_size=0.2,
+            stratify=y_for_split if np.unique(y_for_split).size > 1 else None,
+            random_state=42,
+        )
+        X_train = X[train_idx]; X_test = X[test_idx]
+        y_train = y[train_idx] if y is not None else None
+        y_test  = y[test_idx]  if y is not None else None
+        lats_test = lats[test_idx].tolist() if lats is not None and len(lats) else []
+        lons_test = lons[test_idx].tolist() if lons is not None and len(lons) else []
+    else:
+        split = int(len(X) * 0.8)
+        X_train, X_test = X[:split], X[split:]
+        y_train = y[:split] if y is not None else None
+        y_test  = y[split:] if y is not None else None
+        lats_test = lats[split:].tolist() if lats is not None and len(lats) else []
+        lons_test = lons[split:].tolist() if lons is not None and len(lons) else []
 
     # Auto-assign movement labels when dataset has no true_behavior column.
     # Uses KMeans on speed + altitude + turning angle so boundaries are
     # non-linear — algorithms with different decision boundaries will genuinely
     # disagree rather than all converging on the same speed-rank split.
     effective_label_names = label_names
-    if not label_names and req.service_id != 3:
-        from sklearn.cluster import KMeans
+    if not label_names:
+        from sklearn.mixture import GaussianMixture
         from sklearn.preprocessing import StandardScaler
 
         def _cluster_labels(X_split):
-            # cols: 0=speed, 1=altitude, 2=turning_angle (if available)
+            # GMM is more appropriate than KMeans for behavioural states:
+            # - allows unequal cluster sizes (resting is frequent, migration is rare)
+            # - allows non-spherical clusters (behavioural states are not
+            #   geometrically equal in feature space)
             n_cols = X_split.shape[1]
             feat_idx = [i for i in [0, 1, 2] if i < n_cols]
             feats = X_split[:, feat_idx].astype(float)
             feats = np.nan_to_num(feats, nan=0.0)
             scaler = StandardScaler()
             feats_s = scaler.fit_transform(feats)
-            km = KMeans(n_clusters=4, random_state=42, n_init=10)
-            raw = km.fit_predict(feats_s)
-            # Re-order clusters by mean speed so labels are interpretable
-            centers = km.cluster_centers_
-            speed_idx = 0  # speed is first feature after scaling
-            order = np.argsort(centers[:, speed_idx])
+            gmm = GaussianMixture(
+                n_components=4, covariance_type="full",
+                random_state=42, max_iter=200, n_init=3,
+            )
+            raw = gmm.fit_predict(feats_s)
+            # Re-order components by mean speed so labels are ecologically interpretable:
+            # slowest cluster = Resting, fastest = Migrating
+            means = np.array([feats_s[raw == k, 0].mean() if (raw == k).any() else 0
+                              for k in range(4)])
+            order = np.argsort(means)
             remap = {old: new for new, old in enumerate(order)}
             return np.array([remap[c] for c in raw])
 
@@ -438,19 +475,21 @@ def run_comparison(req: RunRequest):
     # Find algorithm classes
     all_algos = registry.get_by_service(req.service_id)
     algo_map  = {a.name: a for a in all_algos}
+    algo_cat_map = {a.name: getattr(a, "category", "") for a in all_algos}
 
     def run_one(name: str):
         if name not in algo_map:
             return {"name": name, "error": f"'{name}' not found in service {req.service_id}",
                     "f1": None, "accuracy": None, "precision": None, "recall": None,
                     "runtime": None, "predictions": [], "per_class_f1": {},
-                    "service_type": "classification"}
+                    "service_type": "classification", "category": ""}
         try:
             inst = algo_map[name]()
             t0   = time.time()
             inst.fit(X_train, y_train)
             raw  = inst.predict(X_test)
             rt   = round(time.time() - t0, 3)
+            cat  = algo_cat_map.get(name, "")
 
             # S3 (Environmental Factors) returns continuous scores — send as-is
             if req.service_id == 3:
@@ -461,6 +500,7 @@ def run_comparison(req: RunRequest):
                 return {
                     "name":         name,
                     "service_type": "regression",
+                    "category":     cat,
                     "score_label":  inst.description or name,
                     "scores":       scores_norm,
                     "score_min":    round(r_min, 4),
@@ -486,6 +526,7 @@ def run_comparison(req: RunRequest):
             return {
                 "name":          name,
                 "service_type":  "classification",
+                "category":      cat,
                 "f1":            _safe(metrics["f1"]),
                 "accuracy":      _safe(metrics["accuracy"]),
                 "precision":     _safe(metrics["precision"]),
@@ -504,17 +545,19 @@ def run_comparison(req: RunRequest):
     result_a = run_one(req.algo_a)
     result_b = run_one(req.algo_b)
 
-    # Permutation importance — classification only, capped at 2000 rows for speed
+    # Permutation importance — classification and regression, capped at 2000 rows for speed
     from sklearn.inspection import permutation_importance as _perm_imp
-    from sklearn.metrics import accuracy_score
+    from sklearn.metrics import accuracy_score, r2_score
 
     def _perm_scorer(estimator, X, y):
         raw = estimator.predict(X)
+        if req.service_id == 3:
+            return r2_score(y, np.array(raw).astype(float))
         preds = np.clip(np.round(np.array(raw).astype(float)), 0, 99).astype(int)
         return accuracy_score(y, preds)
 
     def _feature_importance(inst, X, y, names):
-        if y is None or req.service_id == 3:
+        if y is None:
             return {}
         try:
             X_imp = np.array(X[:2000]); y_imp = np.array(y[:2000])
@@ -529,16 +572,28 @@ def run_comparison(req: RunRequest):
     def _fitted_inst(name):
         try:
             inst = algo_map[name]()
-            inst.fit(X_train, y_train)
+            if req.service_id == 3:
+                inst.fit(X_train, None)
+            else:
+                inst.fit(X_train, y_train)
             return inst
         except Exception:
             return None
 
-    if req.service_id != 3 and y_test is not None:
-        inst_a = _fitted_inst(req.algo_a)
-        inst_b = _fitted_inst(req.algo_b)
-        result_a["feature_importances"] = _feature_importance(inst_a, X_test, y_test, FEATURE_COLS) if inst_a else {}
-        result_b["feature_importances"] = _feature_importance(inst_b, X_test, y_test, FEATURE_COLS) if inst_b else {}
+    if y_test is not None:
+        # For S3 use env_score as the importance target
+        if req.service_id == 3 and _env_features is not None:
+            from vebita_framework.services.s3_environment.sarah_algorithms import _env_score
+            y_imp_s3 = _env_score(X_test)
+            inst_a = _fitted_inst(req.algo_a)
+            inst_b = _fitted_inst(req.algo_b)
+            result_a["feature_importances"] = _feature_importance(inst_a, X_test, y_imp_s3, FEATURE_COLS) if inst_a else {}
+            result_b["feature_importances"] = _feature_importance(inst_b, X_test, y_imp_s3, FEATURE_COLS) if inst_b else {}
+        else:
+            inst_a = _fitted_inst(req.algo_a)
+            inst_b = _fitted_inst(req.algo_b)
+            result_a["feature_importances"] = _feature_importance(inst_a, X_test, y_test, FEATURE_COLS) if inst_a else {}
+            result_b["feature_importances"] = _feature_importance(inst_b, X_test, y_test, FEATURE_COLS) if inst_b else {}
     else:
         result_a["feature_importances"] = {}
         result_b["feature_importances"] = {}
@@ -578,55 +633,93 @@ def run_comparison(req: RunRequest):
     result_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
 
-    # Cap visual arrays sent to the browser — algorithms already ran on the
-    # full test set so metrics are accurate. Only map dots, chart points, and
-    # score arrays need to be sampled; 20 000 points renders fine and keeps
-    # the JSON response under ~10 MB regardless of dataset size.
-    # Also skip any row where lat or lon is NaN — Leaflet crashes on null coords.
+    # Visualisation uses the FULL track so both S3 and S6 show the complete
+    # animal journey on the map. Predictions/scores are placed at their correct
+    # position in the full track; fixes that were in the training set get None.
     MAX_VIS = 20_000
-    n_vis   = len(lats_test)
 
-    lats_arr = np.array(lats_test, dtype=float)
-    lons_arr = np.array(lons_test, dtype=float)
-    valid_mask = np.isfinite(lats_arr) & np.isfinite(lons_arr)
-    valid_idx  = np.where(valid_mask)[0]
+    lats_full = np.array(lats, dtype=float)
+    lons_full = np.array(lons, dtype=float)
+    valid_mask_full = np.isfinite(lats_full) & np.isfinite(lons_full)
+    valid_idx_full  = np.where(valid_mask_full)[0]
 
-    if len(valid_idx) > MAX_VIS:
-        step = max(1, len(valid_idx) // MAX_VIS)
-        valid_idx = valid_idx[::step][:MAX_VIS]
+    if len(valid_idx_full) > MAX_VIS:
+        step = max(1, len(valid_idx_full) // MAX_VIS)
+        valid_idx_full = valid_idx_full[::step][:MAX_VIS]
 
-    lats_vis = lats_arr[valid_idx].tolist()
-    lons_vis = lons_arr[valid_idx].tolist()
+    lats_vis = lats_full[valid_idx_full].tolist()
+    lons_vis = lons_full[valid_idx_full].tolist()
 
-    # Real feature arrays for the test set — sampled with the same valid_idx
-    # Columns: 0=speed_ms, 1=altitude_m, 2=turning_angle, 3=straightness, 6=step_length_m
-    X_test_arr = np.array(X_test)
-    def _feat_col(col):
-        if X_test_arr.shape[1] > col:
-            return [round(float(X_test_arr[i, col]), 4) for i in valid_idx if i < len(X_test_arr)]
+    # Build lookup: original row index → position in test arrays
+    # S3 (temporal split): test rows are indices split..n
+    # S6 (stratified split): test rows are scattered via test_idx
+    n_total = len(X)
+    if req.service_id == 6:
+        # test_idx is a numpy array of original positions
+        test_pos_map = {int(orig): pos for pos, orig in enumerate(test_idx)}
+    else:
+        split_pos = int(n_total * 0.8)
+        test_pos_map = {orig: orig - split_pos for orig in range(split_pos, n_total)}
+
+    # Full-track feature array for time-series charts (sampled from full X)
+    X_full_arr = np.array(X)
+    def _feat_col_full(col):
+        if X_full_arr.shape[1] > col:
+            return [round(float(X_full_arr[i, col]), 4) for i in valid_idx_full if i < len(X_full_arr)]
         return []
 
-    speeds_vis      = _feat_col(0)
-    altitudes_vis   = _feat_col(1)
-    turns_vis       = _feat_col(2)
-    straightness_vis = _feat_col(3)
-    steps_vis       = _feat_col(6)
+    speeds_vis       = _feat_col_full(0)
+    altitudes_vis    = _feat_col_full(1)
+    turns_vis        = _feat_col_full(2)
+    straightness_vis = _feat_col_full(3)
+    steps_vis        = _feat_col_full(6)
 
-    def _sample_list(lst):
-        if not lst: return lst
-        arr = lst if isinstance(lst, (list,)) else list(lst)
-        return [arr[i] for i in valid_idx if i < len(arr)]
+    def _map_to_full(test_list, default=None):
+        """Place test-set values at their original full-track positions."""
+        if not test_list:
+            return [default] * len(valid_idx_full)
+        out = []
+        for orig_i in valid_idx_full:
+            pos = test_pos_map.get(int(orig_i))
+            val = test_list[pos] if pos is not None and pos < len(test_list) else default
+            # Convert numpy scalars to plain Python types so FastAPI can serialise them
+            if val is not None:
+                val = int(val) if isinstance(val, (np.integer,)) else float(val) if isinstance(val, (np.floating,)) else val
+            out.append(val)
+        return out
 
     def _sample_algo(res):
         out = dict(res)
         if out.get("predictions"):
-            out["predictions"] = _sample_list(out["predictions"])
+            out["predictions"] = _map_to_full(out["predictions"], default=None)
         if out.get("scores"):
-            out["scores"] = _sample_list(out["scores"])
+            out["scores"] = _map_to_full(out["scores"], default=None)
         return out
 
     result_a_vis = _sample_algo(result_a)
     result_b_vis = _sample_algo(result_b)
+
+    # S3: compute per-fix env sub-factors and movement stages
+    X_test_arr = np.array(X_test)
+    env_factors_vis = None
+    stages_vis = None
+    if req.service_id == 3 and _env_features is not None:
+        try:
+            E_test = _env_features(X_test_arr)
+            e_min = E_test.min(axis=0)
+            e_rng = E_test.max(axis=0) - e_min
+            e_rng[e_rng < 1e-9] = 1.0
+            E_norm = (E_test - e_min) / e_rng
+            # Build full-track env factor rows (None for train fixes)
+            test_env_list = [[round(float(E_norm[pos, c]), 3) for c in range(E_norm.shape[1])]
+                             if pos is not None and pos < len(E_norm) else None
+                             for pos in [test_pos_map.get(int(i)) for i in valid_idx_full]]
+            env_factors_vis = {"names": list(ENV_FACTOR_NAMES), "values": test_env_list}
+        except Exception as ex:
+            print(f"[env_factors] failed: {ex}")
+
+    if y_test is not None:
+        stages_vis = _map_to_full([int(v) for v in y_test], default=None)
 
     return _json_safe({
         "result_id":    result_id,
@@ -635,6 +728,7 @@ def run_comparison(req: RunRequest):
         "dataset":      dict(row),
         "n_train":      len(X_train),
         "n_test":       len(X_test),
+        "n_total":      n_total,
         "label_names":  effective_label_names,
         "lats":         lats_vis,
         "lons":         lons_vis,
@@ -646,6 +740,8 @@ def run_comparison(req: RunRequest):
         "algo_a":       result_a_vis,
         "algo_b":       result_b_vis,
         "feature_names": FEATURE_COLS,
+        "env_factors":  env_factors_vis,
+        "stages":       stages_vis,
     })
 
 

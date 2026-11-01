@@ -137,15 +137,47 @@ export default function TimeSeries({ results }) {
     </div>
   )
 
-  const speedData      = results.speeds        || []
-  const altData        = results.altitudes      || []
-  const turnData       = results.turns          || []
-  const stepData       = results.steps          || []
-  const straightData   = results.straightness   || []
+  const speedData      = (results.speeds        || []).filter(v => v != null)
+  const altData        = (results.altitudes      || []).filter(v => v != null)
+  const turnData       = (results.turns          || []).filter(v => v != null)
+  const stepData       = (results.steps          || []).filter(v => v != null)
+  const straightData   = (results.straightness   || []).filter(v => v != null)
 
   const nameA = results.algo_a?.name?.replace(/^(Beh|Env)\s/, '') || 'A'
   const nameB = results.algo_b?.name?.replace(/^(Beh|Env)\s/, '') || 'B'
   const compareMode = results?.compareMode
+
+  // Auto-generated insight for time series tab
+  const tsInsightLines = []
+  if (speedData.length > 0) {
+    const meanSpeed = speedData.reduce((s, v) => s + v, 0) / speedData.length
+    const stdSpeed  = Math.sqrt(speedData.reduce((s, v) => s + (v - meanSpeed) ** 2, 0) / speedData.length)
+    if (meanSpeed < 0.2)
+      tsInsightLines.push(`Average movement speed is very low (${meanSpeed.toFixed(2)} m/s), consistent with an animal that spends most time stationary or foraging slowly.`)
+    else if (meanSpeed < 1.0)
+      tsInsightLines.push(`Average movement speed is ${meanSpeed.toFixed(2)} m/s — typical of walking or exploratory movement. The animal is active but not in sustained travel.`)
+    else
+      tsInsightLines.push(`Average movement speed is high (${meanSpeed.toFixed(2)} m/s), indicating active, purposeful travel or migration for much of the recorded period.`)
+    if (stdSpeed > 0.5 * meanSpeed)
+      tsInsightLines.push(`Speed varies considerably (std dev: ${stdSpeed.toFixed(2)} m/s), suggesting the animal alternates between resting and active movement phases — watch for step changes in the speed chart.`)
+  }
+  if (straightData.length > 0) {
+    const meanStraight = straightData.reduce((s, v) => s + v, 0) / straightData.length
+    if (meanStraight > 0.7)
+      tsInsightLines.push(`The straightness index is high (mean: ${meanStraight.toFixed(2)}), meaning the animal moves in relatively direct paths — this is typical of directed travel or migration.`)
+    else if (meanStraight < 0.35)
+      tsInsightLines.push(`The straightness index is low (mean: ${meanStraight.toFixed(2)}), meaning movement is tortuous and winding — typical of foraging, searching, or territorial patrol.`)
+  }
+  if (compareMode) {
+    const predsA = (results.algo_a?.predictions || []).filter(v => v != null)
+    const predsB = (results.algo_b?.predictions || []).filter(v => v != null)
+    const n = Math.min(predsA.length, predsB.length)
+    if (n > 0) {
+      const agree = predsA.slice(0, n).filter((v, i) => v === predsB[i]).length
+      const pct = Math.round(agree / n * 100)
+      tsInsightLines.push(`The two algorithms assign the same behaviour label for ${pct}% of GPS fixes in the time series. Sections where the lines diverge are where they disagree on which behaviour is occurring.`)
+    }
+  }
 
   const comparisonDatasets = compareMode
     ? [
@@ -158,6 +190,16 @@ export default function TimeSeries({ results }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+      {/* Auto-generated insight at top */}
+      {tsInsightLines.length > 0 && (
+        <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
+          <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>
+          <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, margin: 0 }}>
+            {tsInsightLines.join(' ')}
+          </p>
+        </div>
+      )}
 
       <div className="panel">
         <div className="panel-title">Speed over time</div>
