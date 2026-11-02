@@ -95,11 +95,6 @@ class DBSCANMovementClustering(BaseAlgorithm):
         self.min_samples = min_samples
 
     def fit(self, X, y=None):
-        # DBSCAN's neighbor-graph can hold O(n^2) point-pairs when real GPS
-        # data has dense clusters (e.g. long stationary/roosting periods),
-        # even though sklearn uses a tree internally - this OOM-crashed on a
-        # real ~62k-point movement file. Subsample like the other clustering
-        # algos in this file to bound memory.
         Xf, yf         = _subsample(X, y, max_n=300)
         from sklearn.preprocessing import StandardScaler
         self.scaler_   = StandardScaler().fit(Xf)
@@ -107,7 +102,6 @@ class DBSCANMovementClustering(BaseAlgorithm):
         from sklearn.cluster import DBSCAN
         labels         = DBSCAN(eps=self.eps, min_samples=self.min_samples).fit_predict(Xs)
         self.k_        = max(2, len(np.unique(labels[labels >= 0])))
-        # map noise to nearest valid cluster using centers
         valid = labels >= 0
         if valid.any():
             self.centers_ = _cluster_centers(Xf[valid], labels[valid], self.k_)
@@ -117,9 +111,6 @@ class DBSCANMovementClustering(BaseAlgorithm):
         return self
 
     def predict(self, X):
-        # predict() must stay a plain nearest-center lookup so it scales to
-        # any size test set - re-running a full DBSCAN fit_predict here (as
-        # before) reintroduces the same O(n^2)-memory risk on large data.
         return _nearest(self.centers_, X)
 
 
@@ -137,12 +128,6 @@ class HDBSCANClustering(BaseAlgorithm):
         self.min_cluster_size = min_cluster_size
 
     def fit(self, X, y=None):
-        # Same bug as its sibling OPTICSClustering below (see that class's
-        # comment): HDBSCAN's default algorithm builds an O(n^2) pairwise
-        # distance structure over the FULL dataset -- OOM-kills at
-        # true/large scale (~10.7M rows). This sibling was missed when
-        # OPTICSClustering got the same fix; applying the identical
-        # subsample-before-fit pattern here.
         Xs, _ = _subsample(X, y, max_n=300)
         try:
             from sklearn.cluster import HDBSCAN

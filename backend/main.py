@@ -308,7 +308,6 @@ def run_comparison(req: RunRequest):
         dataset_species = dict(row).get("species", "unknown") or "unknown"
         set_current_species(dataset_species)
 
-    # Load features
     try:
         X, y, label_names, lats, lons = load_dataset_features(row["filename"])
     except Exception as e:
@@ -582,7 +581,6 @@ def run_comparison(req: RunRequest):
             e_rng = E_test.max(axis=0) - e_min
             e_rng[e_rng < 1e-9] = 1.0
             E_norm = (E_test - e_min) / e_rng
-            # Build full-track env factor rows (None for train fixes)
             test_env_list = [[round(float(E_norm[pos, c]), 3) for c in range(E_norm.shape[1])]
                              if pos is not None and pos < len(E_norm) else None
                              for pos in [test_pos_map.get(int(i)) for i in valid_idx_full]]
