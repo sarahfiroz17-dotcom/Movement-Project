@@ -21,7 +21,7 @@ import EnvFactors        from './components/EnvFactors.jsx'
 export default function App() {
   const [activeTab,    setActiveTab]    = useState('Map view')
   const [serviceId,    setServiceId]    = useState(3)
-  const [dataset,      setDataset]      = useState(null)   // {id, name, species, n_fixes}
+  const [dataset,      setDataset]      = useState(null)   
   const [algorithms,   setAlgorithms]   = useState([])
   const [algoA,        setAlgoA]        = useState(null)
   const [algoB,        setAlgoB]        = useState(null)
@@ -31,7 +31,7 @@ export default function App() {
   const [error,        setError]        = useState(null)
   const [backendOk,    setBackendOk]    = useState(true)
 
-  // Load algorithm list whenever service changes
+  
   useEffect(() => {
     setAlgoA(null); setAlgoB(null); setAlgorithms([])
     listAlgorithms(serviceId)
@@ -39,7 +39,7 @@ export default function App() {
       .catch(() => setAlgorithms([]))
   }, [serviceId])
 
-  // Upload handler
+  
   const handleUpload = useCallback(async file => {
     setError(null)
     setUploadPct(0)
@@ -57,9 +57,9 @@ export default function App() {
     }
   }, [])
 
-  // Run analysis handler
-  // Single algo selected → run it against itself (solo mode)
-  // Two algos selected → compare side by side
+  
+  
+  
   const handleRun = useCallback(async () => {
     if (!algoA) { setError('Please select an algorithm'); return }
     const b = algoB || algoA
@@ -80,11 +80,11 @@ export default function App() {
     }
   }, [algoA, algoB, dataset, serviceId, activeTab])
 
-  // Which tab list to use — depends on selected service
+  
   const isEnv = serviceId === 3
   const analysisTabs = isEnv ? TABS_ENV : TABS_ANALYSIS
 
-  // Keep active tab valid when switching services
+  
   useEffect(() => {
     if (!analysisTabs.includes(activeTab) && !TABS_ACCOUNT.includes(activeTab)) {
       setActiveTab('Map view')
@@ -112,7 +112,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      {/* ── Topbar ── */}
+      
       <header className="topbar">
         <div className="logo">Ve<span>bita</span>
           <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400, marginLeft: 12 }}>
@@ -136,7 +136,7 @@ export default function App() {
       </header>
 
       <div className="main-area">
-        {/* ── Sidebar ── */}
+        
         <Sidebar
           serviceId={serviceId}   onServiceChange={id => { setServiceId(id); setResults(null) }}
           dataset={dataset}       onUpload={handleUpload}   uploadPct={uploadPct}
@@ -148,13 +148,13 @@ export default function App() {
             if (name === algoA)       { setAlgoA(null); return }
             if (!algoB)               { setAlgoB(name); return }
             if (name === algoB)       { setAlgoB(null); return }
-            // Both slots full — replace A, clear B
+            
             setAlgoA(name); setAlgoB(null)
           }}
           onRun={handleRun}  loading={loading}  error={error}
         />
 
-        {/* ── Main content ── */}
+        
         <main className="content-area">
           {loading && (
             <div style={{

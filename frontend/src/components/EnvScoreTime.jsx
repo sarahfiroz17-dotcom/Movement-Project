@@ -31,7 +31,7 @@ export default function EnvScoreTime({ results }) {
   const nameA   = results.algo_a?.name?.replace(/^Env\s/, '') || 'Algorithm A'
   const nameB   = results.algo_b?.name?.replace(/^Env\s/, '') || 'Algorithm B'
 
-  // Build cumulative distance axis from steps array (same sampling as scores)
+  
   const stepsRaw = results.steps || []
   const MAX = 500
   const n    = scoresA.length
@@ -41,7 +41,7 @@ export default function EnvScoreTime({ results }) {
   const sampB = idxs.map(i => +(scoresB[i] ?? 0).toFixed(3))
   const diff  = sampA.map((a, i) => +(a - sampB[i]).toFixed(3))
 
-  // Cumulative distance label: accumulate step lengths up to each sampled index
+  
   const useDistance = stepsRaw.length > 0
   let cumDist = []
   if (useDistance) {
@@ -52,7 +52,7 @@ export default function EnvScoreTime({ results }) {
   const labels = useDistance ? cumDist : idxs.map(i => i)
   const xLabel = useDistance ? 'Distance along track (m)' : 'GPS fix index'
 
-  // Smooth using a simple rolling average (window=5)
+  
   const smooth = (arr, w = 5) => arr.map((_, i) => {
     const sl = arr.slice(Math.max(0, i - w), i + w + 1)
     return +(sl.reduce((a, b) => a + b, 0) / sl.length).toFixed(3)
@@ -115,12 +115,12 @@ export default function EnvScoreTime({ results }) {
     },
   }, [results])
 
-  // Count high-disagreement points (diff > 0.2)
+  
   const disagree = diff.filter(d => Math.abs(d) > 0.2).length
   const agreeRate = diff.length > 0 ? (((diff.length - disagree) / diff.length) * 100).toFixed(1) : null
   const compareMode = results?.compareMode
 
-  // Auto-generated insight
+  
   const insightLines = []
   if (compareMode) {
     const agreeNum = parseFloat(agreeRate)
@@ -155,7 +155,7 @@ export default function EnvScoreTime({ results }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-      {/* Stat cards */}
+      
       <div className="metrics-row">
         {compareMode ? (
           <>
@@ -194,7 +194,7 @@ export default function EnvScoreTime({ results }) {
         </div>
       </div>
 
-      {/* Auto-generated insight */}
+      
       <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
         <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>
         <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, margin: 0 }}>
@@ -202,7 +202,7 @@ export default function EnvScoreTime({ results }) {
         </p>
       </div>
 
-      {/* Score over time */}
+      
       <div className="panel">
         <div className="panel-title">Environmental score over time — {nameA} vs {nameB}</div>
         <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 8 }}>
@@ -213,7 +213,7 @@ export default function EnvScoreTime({ results }) {
         </div>
       </div>
 
-      {/* Difference chart — only meaningful in compare mode */}
+      
       {compareMode && (
       <div className="panel">
         <div className="panel-title">Score difference (A − B) — where the two algorithms disagree</div>

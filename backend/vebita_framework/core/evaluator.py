@@ -1,20 +1,3 @@
-"""
-core/evaluator.py
-=================
-VEBITA Shared Evaluator
-
-Computes the right metrics for each service type automatically.
-The benchmark runner calls this — team members don't need to worry about it.
-
-Service metrics:
-    S1 Time Series       → MAE, RMSE, R²
-    S2 Pattern Recog.    → Silhouette score, ARI, NMI
-    S3 Environmental     → Pearson r, Spearman r, R²
-    S4 Anomaly Detection → AUC-ROC, Precision, Recall, F1
-    S5 Segmentation      → Accuracy, F1-macro, Jaccard
-    S6 Classification    → Accuracy, F1-macro, F1-weighted
-"""
-
 import numpy as np
 from typing import Optional, Dict
 
@@ -28,10 +11,6 @@ class Evaluator:
         service_id: int,
         scores:     Optional[np.ndarray] = None,
     ) -> Dict[str, float]:
-        """
-        Compute appropriate metrics for a given service.
-        Returns a flat dict of metric_name → float.
-        """
         try:
             if service_id == 1:
                 return Evaluator._regression_metrics(y_true, y_pred)
@@ -50,7 +29,6 @@ class Evaluator:
         except Exception as e:
             return {"metric_error": str(e)}
 
-    # ── S1: Time series (regression / forecasting) ────────────────────────
     @staticmethod
     def _regression_metrics(y_true, y_pred) -> dict:
         from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -64,7 +42,6 @@ class Evaluator:
             "r2":       round(float(r2_score(y_t, y_p)), 4),
         }
 
-    # ── S2: Pattern recognition / clustering ─────────────────────────────
     @staticmethod
     def _clustering_metrics(y_true, y_pred) -> dict:
         from sklearn.metrics import (
@@ -81,7 +58,6 @@ class Evaluator:
         }
         return metrics
 
-    # ── S3: Environmental factors (correlation) ───────────────────────────
     @staticmethod
     def _correlation_metrics(y_true, y_pred) -> dict:
         from scipy.stats import pearsonr, spearmanr
@@ -98,7 +74,6 @@ class Evaluator:
             "r2":         round(float(r2_score(y_t, y_p)), 4),
         }
 
-    # ── S4: Anomaly detection ─────────────────────────────────────────────
     @staticmethod
     def _anomaly_metrics(y_true, y_pred, scores=None) -> dict:
         from sklearn.metrics import (
@@ -110,7 +85,6 @@ class Evaluator:
         min_len = min(len(y_t), len(y_p))
         y_t, y_p = y_t[:min_len], y_p[:min_len]
 
-        # Convert to binary if needed
         y_t_bin = (y_t > 0).astype(int)
         y_p_bin = (y_p > 0).astype(int)
 
@@ -127,7 +101,6 @@ class Evaluator:
                 pass
         return metrics
 
-    # ── S5: Trajectory segmentation ───────────────────────────────────────
     @staticmethod
     def _segmentation_metrics(y_true, y_pred) -> dict:
         from sklearn.metrics import (
@@ -139,7 +112,6 @@ class Evaluator:
         min_len = min(len(y_t), len(y_p))
         y_t, y_p = y_t[:min_len], y_p[:min_len]
 
-        # Re-map predicted labels to best matching true labels
         y_p_mapped = Evaluator._remap_labels(y_t, y_p)
 
         metrics = {
@@ -150,7 +122,6 @@ class Evaluator:
         }
         return metrics
 
-    # ── S6: Behavioural classification ────────────────────────────────────
     @staticmethod
     def _classification_metrics(y_true, y_pred) -> dict:
         from sklearn.metrics import (
@@ -168,13 +139,8 @@ class Evaluator:
             "recall":      round(float(recall_score(y_t, y_p, average="macro", zero_division=0)), 4),
         }
 
-    # ── Utility: remap cluster labels to best matching true labels ────────
     @staticmethod
     def _remap_labels(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
-        """
-        HMM / clustering algorithms return arbitrary integer labels.
-        This maps each predicted label to the true label it overlaps most with.
-        """
         from scipy.stats import mode
         y_out = np.zeros_like(y_pred)
         for label in np.unique(y_pred):

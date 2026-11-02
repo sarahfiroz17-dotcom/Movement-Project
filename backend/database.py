@@ -1,8 +1,3 @@
-"""
-database.py  —  SQLite setup for Vebita
-Single file: vebita.db lives in the backend/ folder.
-"""
-
 import sqlite3, os
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "vebita.db")

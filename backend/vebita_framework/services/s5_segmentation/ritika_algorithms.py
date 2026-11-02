@@ -1,12 +1,3 @@
-"""
-services/s5_segmentation/dua_algorithms.py
-==========================================
-Dua's 79 trajectory-segmentation algorithms for VEBITA Service 5.
-
-predict() returns an integer numpy array of segment / behavioral-state labels.
-The evaluator auto-remaps unsupervised cluster IDs to true behaviour labels.
-"""
-
 import numpy as np
 from scipy import stats, signal
 from scipy.spatial.distance import cdist
@@ -29,7 +20,6 @@ except ImportError:
 from core.base import BaseAlgorithm
 from core.registry import registry
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _subsample(X, y=None, max_n=500, seed=42):
     if len(X) <= max_n:
@@ -80,7 +70,6 @@ def _breakpoints_to_labels(bkpts, n):
     return labels
 
 class _Fenwick:
-    """Binary indexed tree over rank-compressed coordinates 0..size-1."""
     def __init__(self, size):
         self.n = size
         self.tree = [0] * (size + 1)
@@ -100,21 +89,6 @@ class _Fenwick:
         return s
 
 def _mk_scores_sliding(x, w):
-    """Rolling Mann-Kendall |S|-statistic for every centered window
-    [i-w, i+w) at i in range(w, n-w), computed incrementally with a
-    Fenwick tree instead of recomputing rankdata + an O(w^2) double
-    loop from scratch at each position.
-
-    Mathematically S = sum_{a<b} sign(x_b - x_a) over the window, and
-    sign(rank_b - rank_a) == sign(x_b - x_a), so ranks are unnecessary:
-    we rank-compress the whole series once (coordinates), then maintain
-    S while the window slides by one element (remove x[lo], add
-    x[hi]) using the Fenwick tree to get counts of elements less-than /
-    greater-than the incoming/outgoing value in O(log n). This gives the
-    exact same S values as the original brute-force implementation
-    (verified against it on randomized inputs, including ties) in
-    O(n log n) total instead of O(n * w^2).
-    """
     n = len(x)
     scores = np.zeros(n)
     if n - 2 * w <= 0:
@@ -158,26 +132,6 @@ def _mk_scores_sliding(x, w):
     return scores
 
 def _bounded_sliding_scores(x, w, test_fn, max_w=2000, max_candidates=2000):
-    """Bound the cost of a per-position sliding-window statistical test.
-
-    WilcoxonSlidingSeg / VarianceLeveneSeg originally called scipy's
-    ranksums/levene on a window of size w at EVERY one of the ~n candidate
-    positions, with w = max(n // (n_states*3), 5) scaling linearly with n.
-    That's at minimum O(n*w) work -- fine at n~62K (a few seconds) but a
-    hang at n~13.39M (stuck inside a single scipy C call long enough that
-    even a SIGALRM can't interrupt it).
-
-    This caps the window fed to the test at max_w points per side, and
-    evaluates the test at only `max_candidates` evenly spaced positions
-    (nearest-neighbor-filling the rest) instead of every single position.
-    For n small enough that the original loop was already within budget
-    (total candidate positions <= max_candidates and w <= max_w), this is
-    an EXACT no-op (step=1, eff_w=w) -- verified against the original
-    brute-force implementation on randomized small-n trials. It only
-    changes behavior as n grows large, the same class of fix already
-    applied elsewhere in this file/codebase (subsampling, decimation) for
-    algorithms whose cost grows faster than linearly with n.
-    """
     n = len(x)
     scores = np.zeros(n)
     lo_bound, hi_bound = w, n - w
@@ -202,14 +156,10 @@ def _bounded_sliding_scores(x, w, test_fn, max_w=2000, max_candidates=2000):
     return scores
 
 def _align_supervised(X_train, y_train, X_test, cluster_fn):
-    """Fit cluster_fn on X_train, assign test cluster IDs; evaluator remaps."""
     cluster_fn.fit(X_train)
     return cluster_fn.predict(X_test)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 1. HMM Family — remaining 10 (after the 4 basic ones in example pipeline)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 
@@ -345,9 +295,6 @@ class HiddenSemiMarkovSeg(BaseAlgorithm):
 
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 2. Change Point — remaining 16
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class BinarySegmentation(BaseAlgorithm):
@@ -365,13 +312,6 @@ class BinarySegmentation(BaseAlgorithm):
         return self
 
     def _binseg(self, x, n_bkpts):
-        # Recomputing x[lo:bp].mean() and x[bp:hi].mean() from scratch for
-        # every candidate breakpoint made the search over all ~n positions
-        # O(n) per candidate, i.e. O(n^2) per split - fine at 62k rows (a
-        # couple of seconds) but a ~26-hour operation extrapolated to 13M+
-        # rows. A prefix-sum lets any range mean be read in O(1), giving
-        # the exact same gain values (verified against the original on
-        # randomized inputs) in O(n) per split instead of O(n^2).
         cumsum = np.concatenate(([0.0], np.cumsum(x)))
         def mean_range(lo, hi):
             return (cumsum[hi] - cumsum[lo]) / (hi - lo)
@@ -426,16 +366,6 @@ class DPFixedKSeg(BaseAlgorithm):
         n = len(x)
         k = self.n_
 
-        # The exact DP below is O(n * window) to build the cost table plus
-        # an O(k * n * window) fill, with window ~ n/k*3 - i.e. effectively
-        # O(n^2) to O(n^3) in n. It already took 8+s on a 4.3k-point file;
-        # on a real ~60k-point file it never finished (multi-minute hang,
-        # not a crash - just an infeasible nested Python loop). Random
-        # subsampling (like the clustering algos use) would scramble time
-        # order and break segment-variance semantics, so instead we
-        # decimate on a stride to preserve chronological order, run the
-        # exact DP on that reduced series, then map the resulting
-        # breakpoints back to the original index range.
         MAX_N = 1200
         if n > MAX_N:
             step = int(np.ceil(n / MAX_N))
@@ -499,11 +429,6 @@ class MannKendallSeg(BaseAlgorithm):
         x = X[:, 0]
         n = len(x)
         w = max(n // (self.n_ * 2), 5)
-        # Was O(n * w^2) (rankdata + nested sign-sum recomputed from
-        # scratch at every window position) -> effectively O(n^3) since w
-        # scales with n. Replaced with an O(n log n) incremental
-        # Fenwick-tree sliding window (see _mk_scores_sliding) that
-        # produces identical S-statistic values.
         scores = _mk_scores_sliding(x, w)
         bkpts = []
         for _ in range(self.n_ - 1):
@@ -530,10 +455,6 @@ class WilcoxonSlidingSeg(BaseAlgorithm):
         x = X[:, 0]
         n = len(x)
         w = max(n // (self.n_ * 3), 5)
-        # Was O(n * w) (scipy ranksums call at every single position,
-        # w scaling linearly with n) -> hangs at n~13M. Bounded via
-        # _bounded_sliding_scores (see docstring); exact no-op at the
-        # dataset sizes this was originally verified against.
         scores = np.abs(_bounded_sliding_scores(x, w, lambda a, b: stats.ranksums(a, b)))
         bkpts = []
         for _ in range(self.n_ - 1):
@@ -562,8 +483,6 @@ class VarianceLeveneSeg(BaseAlgorithm):
         x = X[:, 0]
         n = len(x)
         w = max(n // (self.n_ * 3), 5)
-        # Same O(n * w) -> hang-at-scale bug as WilcoxonSlidingSeg above;
-        # same bounded fix.
         scores = _bounded_sliding_scores(x, w, lambda a, b: stats.levene(a, b))
         bkpts = []
         for _ in range(self.n_ - 1):
@@ -577,9 +496,6 @@ class VarianceLeveneSeg(BaseAlgorithm):
 
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 3. Clustering (16)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 
@@ -647,10 +563,6 @@ class OPTICSSeg(BaseAlgorithm):
         return self
 
     def predict(self, X):
-        # Was a single cdist(Xsc, self.core_X_) over the WHOLE test set at
-        # once -> materializes an n_test x n_core distance matrix, which is
-        # 3.89 GiB (MemoryError) at n_test~2.68M. Batch it: identical
-        # per-row argmin result, bounded peak memory.
         Xsc = self.scaler_.transform(X)
         batch = 5000
         out = np.empty(len(Xsc), dtype=self.core_L_.dtype)
@@ -672,11 +584,6 @@ class BIRCHSeg(BaseAlgorithm):
 
     def fit(self, X, y=None):
         self.n_ = _n_states(y)
-        # Was Birch.fit() on the FULL, unsubsampled training set (every
-        # sibling clustering algo in this file subsamples fit data) ->
-        # times out building the CF-tree at n~10.7M rows. Birch.predict()
-        # only compares against the fitted subcluster centroids, so it
-        # stays fast on the full test set regardless.
         Xs, _ = _subsample(X, max_n=2000)
         self.model_ = Birch(n_clusters=self.n_, threshold=0.5)
         self.model_.fit(Xs)
@@ -697,13 +604,6 @@ class FuzzyCMeansSeg(BaseAlgorithm):
 
     def fit(self, X, y=None):
         self.n_ = _n_states(y)
-        # Was 50 EM iterations of cdist + a 3D broadcast
-        # (u[:,:,None]**m * X[:,None,:]) run directly on the FULL,
-        # unsubsampled training set -- the only clustering algo in this
-        # file without subsampling. At n~10.7M rows that 3D array is
-        # multiple GB, reallocated on every iteration -> OOM/hang.
-        # Subsample like every sibling clustering algo here (MeanShiftSeg,
-        # OPTICSSeg, BIRCHSeg).
         Xs, _ = _subsample(X, max_n=2000)
         np.random.seed(42)
         self.centers_ = Xs[np.random.choice(len(Xs), self.n_, replace=False)].copy()
@@ -720,8 +620,6 @@ class FuzzyCMeansSeg(BaseAlgorithm):
         return self
 
     def predict(self, X):
-        # Batched for the same reason as OPTICSSeg.predict(): bounds peak
-        # memory on huge test sets instead of building one big array.
         m = 2.0
         batch = 5000
         out = np.empty(len(X), dtype=int)
@@ -761,12 +659,6 @@ class KShapeSeg(BaseAlgorithm):
         return self
 
     def _sbd_matrix(self, X, centers):
-        # Was a nested pure-Python for-loop (per center x per row of X)
-        # -> ~10.7M Python-level iterations at n_test~2.68M, n_clusters~4
-        # (this ran unbounded on predict()'s full test set, unlike fit()
-        # which already subsamples). Vectorized via one matmul: identical
-        # up to floating-point rounding (verified against the loop version,
-        # max diff ~1e-16, same argmin every trial).
         Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-12)
         Cn = centers / (np.linalg.norm(centers, axis=1, keepdims=True) + 1e-12)
         return 1 - Xn @ Cn.T
@@ -787,10 +679,6 @@ class SOMSeg(BaseAlgorithm):
 
     def fit(self, X, y=None):
         self.n_ = _n_states(y)
-        # Was `for x in X:` over the FULL, unsubsampled training set for 5
-        # epochs -> ~53M pure-Python iterations at n~10.7M. Every sibling
-        # clustering algo in this file subsamples fit data; this one
-        # didn't. Subsample like the others (exact no-op below max_n).
         Xs, _ = _subsample(X, max_n=2000)
         np.random.seed(42)
         self.weights_ = Xs[np.random.choice(len(Xs), self.n_, replace=False)].copy().astype(float)
@@ -808,9 +696,6 @@ class SOMSeg(BaseAlgorithm):
         return np.argmin(cdist(X, self.weights_), axis=1)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 4. Statistical Methods (16)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 
@@ -891,14 +776,6 @@ class ACFSeg(BaseAlgorithm):
         return self
 
     def _acf_features(self, X):
-        # Was `for i in range(n):` with per-row slicing + numpy calls --
-        # window size w=20 is fixed (not scaling with n, so this is only
-        # O(n)), but at n~13.39M the pure-Python-loop overhead alone made
-        # it take far too long. Vectorized in bounded chunks via
-        # sliding_window_view (identical results -- verified against the
-        # loop version on randomized trials, max diff ~1e-16 -- while
-        # keeping peak memory independent of n, ~500MB at true scale
-        # instead of one huge whole-array allocation).
         x = X[:, 0]
         n = len(x)
         w = 20
@@ -956,9 +833,6 @@ class CTMMSeg(BaseAlgorithm):
         return self
 
     def _tau(self, speed):
-        # Same fixed-window-but-too-slow-at-scale bug as ACFSeg._acf_features
-        # above; same chunked-vectorization fix (verified exact match on
-        # randomized trials, including the seg.std()<=1e-12 branch).
         n = len(speed)
         w = 20
         tau = np.zeros(n)
@@ -994,9 +868,6 @@ class CTMMSeg(BaseAlgorithm):
         return self.model_.predict(np.column_stack([speed, tau]))
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 5. Deep Learning Approximations (13)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 
@@ -1021,17 +892,6 @@ class BiLSTMSegProxy(BaseAlgorithm):
         return self
 
     def _run_dir(self, X, W, max_len=5000, expand=True):
-        # Was a `for i, x in enumerate(X):` sequential recurrence run on
-        # the FULL X in both fit() (~10.7M rows) and predict() (~2.68M
-        # rows) with no bound at all -- per-step cost is tiny (two 8x8
-        # matvecs) but millions of Python-level iterations is too slow
-        # (>30s at true scale). Bound via order-preserving stride
-        # decimation (random subsampling would scramble the temporal order
-        # the recurrence depends on -- same reasoning as BC_E83_LSTM's fit
-        # fix in service 6), then repeat each hidden state to refill the
-        # full output length predict() must return. Exact no-op when
-        # n <= max_len (step=1) -- verified against the unbounded loop on
-        # randomized small-n trials.
         Wx, Wh = W
         n = len(X)
         step = max(1, int(np.ceil(n / max_len))) if n > max_len else 1
@@ -1046,14 +906,6 @@ class BiLSTMSegProxy(BaseAlgorithm):
         return np.repeat(hs, step, axis=0)[:n]
 
     def _run(self, X, expand=True):
-        # expand=False (used by fit(), below) skips re-expanding back to
-        # full length -- fit() only needs the bounded decimated hidden
-        # states to train KMeans on, and re-expanding+hstacking a
-        # ~10.7M-row array here was itself an OOM (verified: several GB of
-        # transient repeat/hstack copies on top of feeding KMeans.fit() a
-        # huge unsubsampled array, unlike every sibling clustering fit in
-        # this file). predict() keeps expand=True since ITS output length
-        # must match the full test set.
         fwd = self._run_dir(X, self.Wf_, expand=expand)
         bwd = self._run_dir(X[::-1], self.Wb_, expand=expand)[::-1]
         return np.hstack([fwd, bwd])
@@ -1078,8 +930,6 @@ class GRUSegProxy(BaseAlgorithm):
         self.Wz_ = np.random.randn(h, d + h) * 0.1
         self.Wr_ = np.random.randn(h, d + h) * 0.1
         self.Wn_ = np.random.randn(h, d + h) * 0.1
-        # expand=False: same OOM-avoidance reasoning as BiLSTMSegProxy.fit
-        # above -- fit() only needs the bounded decimated hidden states.
         hidden = self._run(X, expand=False)
         self.model_ = KMeans(n_clusters=self.n_, random_state=42)
         self.model_.fit(hidden)
@@ -1089,10 +939,6 @@ class GRUSegProxy(BaseAlgorithm):
         return 1 / (1 + np.exp(-np.clip(x, -10, 10)))
 
     def _run(self, X, max_len=5000, expand=True):
-        # Same unbounded-full-X sequential-recurrence bug as
-        # BiLSTMSegProxy._run_dir above; same order-preserving-decimation
-        # fix (exact no-op below max_len, verified against the unbounded
-        # loop on randomized trials).
         n_rows = len(X)
         step = max(1, int(np.ceil(n_rows / max_len))) if n_rows > max_len else 1
         Xs = X[::step]
@@ -1173,9 +1019,6 @@ class LSTMHMMHybridSeg(BaseAlgorithm):
 
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 6. Ecology-Specific (6)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 
@@ -1250,11 +1093,6 @@ class MajorityVoteEnsembleSeg(BaseAlgorithm):
 
     def fit(self, X, y=None):
         self.n_ = _n_states(y)
-        # Was 3 separate model fits (KMeans with n_init=10, GaussianMixture,
-        # GaussianHMM) all run on the FULL, unsubsampled training set
-        # (~10.7M rows) at once -- unlike every sibling ensemble/clustering
-        # algo in this file. Got OOM-killed at true scale. Subsample like
-        # the others (exact no-op below max_n).
         Xs, _ = _subsample(X, max_n=2000)
         self.km_ = KMeans(n_clusters=self.n_, random_state=42, n_init=10).fit(Xs)
         self.gm_ = GaussianMixture(n_components=self.n_, random_state=42).fit(Xs)
@@ -1271,12 +1109,6 @@ class MajorityVoteEnsembleSeg(BaseAlgorithm):
         p1 = self.km_.predict(X)
         p2 = self.gm_.predict(X)
         p3 = _predict_hmm(self.hmm_, X) if self.hmm_ is not None else p1
-        # Was `for row in combined: np.bincount(row).argmax()` -- a
-        # pure-Python loop over every test row (~2.68M at true scale),
-        # same class of bug as the ACF/CTMM/BiLSTM fixes above. Vectorized
-        # via one-hot counting (identical tie-breaking to bincount+argmax:
-        # lowest label index wins ties -- verified exact match against the
-        # loop version on randomized trials).
         combined = np.stack([p1, p2, p3], axis=1)
         nbins = max(self.n_, int(combined.max()) + 1) if combined.size else self.n_
         onehot = (combined[:, :, None] == np.arange(nbins)[None, None, :])

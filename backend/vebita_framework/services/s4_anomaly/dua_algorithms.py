@@ -1,27 +1,3 @@
-"""
-services/s4_anomaly/dua_algorithms.py
-======================================
-VEBITA — Service 4: Anomaly Detection (Dua)
-
-100 algorithms across 6 families:
-  A. Linear & Statistical          (algorithms  1-30)
-  B. Tree & Ensemble Methods       (algorithms 31-55)
-  C. Kernel & Distance-Based       (algorithms 56-70)
-  D. Probabilistic & Bayesian      (algorithms 71-80)
-  E. Deep Learning (NumPy proxy)   (algorithms 81-90)
-  F. Ecological / Movement-Specific(algorithms 91-100)
-
-Feature matrix X shape: (n_points, 8)
-  [0] speed_ms        [1] altitude_m      [2] turning_angle   [3] straightness
-  [4] speed_roll_mean [5] speed_roll_std  [6] step_length_m   [7] alt_roll_mean
-
-predict() returns float array:  1 = anomaly,  0 = normal
-Service ID: 4
-
-Activate in main.py:
-    from vebita_framework.services.s4_anomaly.dua_algorithms import *
-"""
-
 import warnings
 import numpy as np
 from scipy import stats
@@ -45,14 +21,8 @@ from core.registry import registry
 warnings.filterwarnings("ignore")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SHARED HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
 
 def _subsample(X, y=None, max_n=2000, seed=42):
-    """Bound n for algorithms whose per-fit or per-query cost grows with
-    how many reference points they compare against (e.g. KDE), matching
-    the subsampling pattern used for the same issue elsewhere."""
     if len(X) <= max_n:
         return X, y
     rng = np.random.RandomState(seed)
@@ -85,13 +55,9 @@ def _sk_binary(pred):
     return (pred == -1).astype(float)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# A. LINEAR & STATISTICAL  (#1 – #30)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class AD_A01_ZScoreMax(BaseAlgorithm):
-    """A01 — Max per-feature z-score exceeds threshold."""
     name = "AD A01 Z-Score Max"
     service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
     description = "Max per-feature z-score anomaly detector"
@@ -111,7 +77,6 @@ class AD_A01_ZScoreMax(BaseAlgorithm):
 
 @registry.register
 class AD_A04_Mahalanobis(BaseAlgorithm):
-    """A04 — Mahalanobis distance from centroid."""
     name = "AD A04 Mahalanobis"
     service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
     description = "Mahalanobis distance anomaly detection"
@@ -131,7 +96,6 @@ class AD_A04_Mahalanobis(BaseAlgorithm):
 
 @registry.register
 class AD_A05_RobustMahalanobis(BaseAlgorithm):
-    """A05 — Robust Mahalanobis using trimmed mean and covariance."""
     name = "AD A05 Robust Mahalanobis"
     service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
     description = "Robust (IQR-trimmed) Mahalanobis distance"
@@ -151,7 +115,6 @@ class AD_A05_RobustMahalanobis(BaseAlgorithm):
 
 @registry.register
 class AD_A06_IQR(BaseAlgorithm):
-    """A06 — IQR rule: flag any feature outside 1.5×IQR."""
     name = "AD A06 IQR Outlier"
     service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
     description = "Per-feature IQR fence outlier detection"
@@ -169,7 +132,6 @@ class AD_A06_IQR(BaseAlgorithm):
 
 @registry.register
 class AD_A07_ModifiedZScore(BaseAlgorithm):
-    """A07 — Modified z-score using median and MAD."""
     name = "AD A07 Modified Z-Score (MAD)"
     service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
     description = "Median Absolute Deviation robust z-score"
@@ -193,7 +155,6 @@ class AD_A07_ModifiedZScore(BaseAlgorithm):
 
 @registry.register
 class AD_A11_CUSUM(BaseAlgorithm):
-    """A11 — CUSUM (cumulative sum control) on speed."""
     name = "AD A11 CUSUM"
     service_id = 4; category = "A_statistical"; library = "numpy"; animals = ["all"]
     description = "CUSUM change detection on speed feature"
@@ -213,7 +174,6 @@ class AD_A11_CUSUM(BaseAlgorithm):
 
 @registry.register
 class AD_A13_EllipticEnvelope(BaseAlgorithm):
-    """A13 — Robust covariance elliptic envelope."""
     name = "AD A13 Elliptic Envelope"
     service_id = 4; category = "A_statistical"; library = "sklearn"; animals = ["all"]
     description = "sklearn EllipticEnvelope robust covariance anomaly detector"
@@ -266,13 +226,9 @@ class AD_A13_EllipticEnvelope(BaseAlgorithm):
 
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# B. TREE & ENSEMBLE METHODS  (#31 – #55)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class AD_B31_IsolationForest5(BaseAlgorithm):
-    """B31 — Isolation Forest (contamination=5%)."""
     name = "AD B31 Isolation Forest 5pct"
     service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
     description = "Standard Isolation Forest with 5% contamination"
@@ -304,7 +260,6 @@ class AD_B31_IsolationForest5(BaseAlgorithm):
 
 @registry.register
 class AD_B41_DBSCANNoise(BaseAlgorithm):
-    """B41 — DBSCAN noise points as anomalies."""
     name = "AD B41 DBSCAN Noise Points"
     service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
     description = "DBSCAN clusters — noise label = anomaly"
@@ -314,13 +269,6 @@ class AD_B41_DBSCANNoise(BaseAlgorithm):
         self.sc_ = StandardScaler().fit(X)
         self.is_fitted = True; return self
     def predict(self, X):
-        # DBSCAN doesn't generalize to new points by design (it's a batch
-        # method), and fit_predict() on the FULL, unsubsampled test set
-        # never finished in 175s in isolation at true scale (~2.68M rows).
-        # Same fix pattern as OPTICSClustering/HDBSCANClustering in
-        # services/s2_patterns: fit DBSCAN on a bounded subsample, then
-        # flag every point in the full set as anomalous by its (batched)
-        # distance to the nearest non-noise point from that subsample.
         Xs = self.sc_.transform(X)
         Xsub, _ = _subsample(Xs, max_n=2000)
         labels_sub = DBSCAN(eps=self.eps, min_samples=5).fit_predict(Xsub)
@@ -345,19 +293,12 @@ class AD_B41_DBSCANNoise(BaseAlgorithm):
 
 @registry.register
 class AD_B45_OneClassSVM_RBF(BaseAlgorithm):
-    """B45 — One-Class SVM with RBF kernel."""
     name = "AD B45 One-Class SVM RBF"
     service_id = 4; category = "B_tree"; library = "sklearn"; animals = ["all"]
     description = "One-Class SVM with RBF kernel for GPS anomaly"
 
     def __init__(self): super().__init__()
     def fit(self, X, y=None):
-        # OneClassSVM's training cost grows superlinearly with n --
-        # infeasible on the FULL ~10.7M-row training set. Subsample
-        # (exact no-op below max_n=2000); with nu=0.05 that keeps support
-        # vectors ~5% of the sample (~100 at max_n=2000), so predict()
-        # stays fast on the full test set too (measured ~4s at true scale,
-        # vs. the unbounded-support-vector-count risk seen in EnvSVR).
         Xs, _ = _subsample(X, max_n=2000)
         self.sc_ = StandardScaler().fit(Xs)
         self.m_ = OneClassSVM(kernel="rbf", nu=0.05, gamma="scale")
@@ -385,30 +326,15 @@ class AD_B45_OneClassSVM_RBF(BaseAlgorithm):
 
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# C. KERNEL & DISTANCE-BASED  (#56 – #70)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class AD_C56_LOF_k20(BaseAlgorithm):
-    """C56 — Local Outlier Factor (k=20)."""
     name = "AD C56 LOF k=20"
     service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
     description = "LOF with 20 neighbours for GPS track anomaly"
 
     def __init__(self): super().__init__()
     def fit(self, X, y=None):
-        # LOF's fit_predict() re-scores the WHOLE set it's given against
-        # itself every call -- fine at small n, but calling it on the
-        # FULL, unsubsampled test set (~2.68M rows at true scale) took
-        # 50s+ at just n=300k in isolation (would be minutes at true
-        # scale) since it needs a k-NN query for every point. Use LOF's
-        # novelty=True mode instead: fit a k-NN structure on a bounded
-        # reference sample once, then predict() scores new points against
-        # that FIXED reference (an actual sklearn-supported way to bound
-        # this cost, not an approximation of a different algorithm) --
-        # measured ~14s for the full test set at max_n=500 (was 400s+
-        # unbounded).
         Xs, _ = _subsample(X, max_n=500)
         k = min(20, len(Xs) - 1)
         self.lof_ = LocalOutlierFactor(n_neighbors=k, novelty=True).fit(Xs)
@@ -426,18 +352,12 @@ class AD_C56_LOF_k20(BaseAlgorithm):
 
 @registry.register
 class AD_C60_LOF_Cosine(BaseAlgorithm):
-    """C60 — LOF with cosine distance metric."""
     name = "AD C60 LOF Cosine"
     service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
     description = "LOF using cosine distance for direction-sensitive anomaly"
 
     def __init__(self): super().__init__()
     def fit(self, X, y=None):
-        # Same fit_predict-on-the-full-test-set bug as AD_C56_LOF_k20
-        # above -- worse here since cosine distance forces sklearn's
-        # neighbor search to brute force (no tree structure supports it),
-        # making the unbounded version O(n^2). Same novelty=True +
-        # bounded-reference fix.
         Xs, _ = _subsample(X, max_n=500)
         k = min(20, len(Xs) - 1)
         self.lof_ = LocalOutlierFactor(n_neighbors=k, metric="cosine", novelty=True).fit(Xs)
@@ -449,20 +369,12 @@ class AD_C60_LOF_Cosine(BaseAlgorithm):
 
 @registry.register
 class AD_C61_KNNMeanDist(BaseAlgorithm):
-    """C61 — Mean kNN distance (k=5)."""
     name = "AD C61 KNN Mean Distance"
     service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
     description = "Mean distance to 5 nearest neighbours"
 
     def __init__(self): super().__init__()
     def fit(self, X, y=None):
-        # NearestNeighbors.kneighbors() cost scales with the size of the
-        # fitted reference set for every query - fitting and querying
-        # against the full training set (10M+ rows) made both the
-        # threshold computation here and predict() below take minutes.
-        # Bounding the reference set keeps both fast regardless of input
-        # size, same fix as the other neighbor/kernel-based algorithms
-        # in this file.
         Xs, _ = _subsample(X, max_n=500)
         k = min(6, len(Xs) - 1)
         self.nn_ = NearestNeighbors(n_neighbors=k).fit(Xs)
@@ -479,24 +391,12 @@ class AD_C61_KNNMeanDist(BaseAlgorithm):
 
 @registry.register
 class AD_C64_KernelDensityGaussian(BaseAlgorithm):
-    """C64 — Gaussian KDE negative log-density."""
     name = "AD C64 Gaussian KDE"
     service_id = 4; category = "C_kernel"; library = "sklearn"; animals = ["all"]
     description = "Negative Gaussian KDE log-density anomaly score"
 
     def __init__(self): super().__init__()
     def fit(self, X, y=None):
-        # KernelDensity.score_samples scores every point against every
-        # reference point the tree holds - at 62k training points scoring
-        # itself for the threshold took 100s+, and predict() on a large
-        # test set would have the same problem. Bounding the *reference*
-        # set (not the query set) keeps both fit and predict fast
-        # regardless of how much data comes in, same fix as the other
-        # comparison-cost-scales-with-n algorithms in this project.
-        # NOTE: max_n=2000 was still too slow for predict() at true scale
-        # (2.68M test rows x 2000 ref pts >130s measured) - 200 keeps the
-        # full-test-set predict under ~15s while still giving a reasonable
-        # density estimate.
         self.sc_ = StandardScaler().fit(X)
         Xs = self.sc_.transform(X)
         Xs_ref, _ = _subsample(Xs, None, max_n=200)
@@ -520,13 +420,9 @@ class AD_C64_KernelDensityGaussian(BaseAlgorithm):
 
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# D. PROBABILISTIC & BAYESIAN  (#71 – #80)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class AD_D71_GaussianLikelihood(BaseAlgorithm):
-    """D71 — Negative Gaussian log-likelihood per point."""
     name = "AD D71 Gaussian Log-Likelihood"
     service_id = 4; category = "D_probabilistic"; library = "numpy"; animals = ["all"]
     description = "Multivariate Gaussian negative log-likelihood anomaly"
@@ -546,7 +442,6 @@ class AD_D71_GaussianLikelihood(BaseAlgorithm):
 
 @registry.register
 class AD_D73_GammaDistribution(BaseAlgorithm):
-    """D73 — Gamma distribution tail on speed."""
     name = "AD D73 Gamma Distribution Tail"
     service_id = 4; category = "D_probabilistic"; library = "scipy"; animals = ["all"]
     description = "Gamma-distribution negative log-likelihood on speed"
@@ -576,21 +471,12 @@ class AD_D73_GammaDistribution(BaseAlgorithm):
 
 @registry.register
 class AD_D80_GMMLogLikelihood(BaseAlgorithm):
-    """D80 — Multi-component GMM log-likelihood."""
     name = "AD D80 GMM Log-Likelihood"
     service_id = 4; category = "D_probabilistic"; library = "sklearn"; animals = ["all"]
     description = "Gaussian Mixture Model negative log-likelihood anomaly"
 
     def __init__(self): super().__init__()
     def fit(self, X, y=None):
-        # GaussianMixture's EM fit (and the score_samples() call used for
-        # the threshold) both cost O(n) per iteration over whatever is
-        # passed in - on the full 10M+ row training set this took 100s+
-        # even though predict() on the (much smaller) test set is fast.
-        # A 3-component GMM converges to essentially the same mixture
-        # whether fit on the full data or a bounded random subsample, so
-        # this is a safe scaling fix, same pattern as the other GMM/EM
-        # based algorithms in this project.
         from sklearn.mixture import GaussianMixture
         Xs, _ = _subsample(X, max_n=20000)
         self.gm_ = GaussianMixture(n_components=3, random_state=42).fit(Xs)
@@ -600,13 +486,9 @@ class AD_D80_GMMLogLikelihood(BaseAlgorithm):
         return (-self.gm_.score_samples(X) > self.thr_).astype(float)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# E. DEEP LEARNING (NumPy proxy)  (#81 – #90)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class AD_E81_PCAReconstruction2(BaseAlgorithm):
-    """E81 — PCA reconstruction error (2 components)."""
     name = "AD E81 PCA Reconstruction 2"
     service_id = 4; category = "E_deep"; library = "sklearn"; animals = ["all"]
     description = "PCA 2-component reconstruction error as anomaly score"
@@ -631,19 +513,12 @@ class AD_E81_PCAReconstruction2(BaseAlgorithm):
 
 @registry.register
 class AD_E85_AutoencoderTanh(BaseAlgorithm):
-    """E85 — Numpy 1-hidden-layer autoencoder (tanh)."""
     name = "AD E85 Autoencoder Tanh"
     service_id = 4; category = "E_deep"; library = "numpy"; animals = ["all"]
     description = "1-hidden-layer numpy autoencoder with tanh activations"
 
     def __init__(self, epochs=50, lr=0.01): super().__init__(epochs=epochs, lr=lr); self.epochs=epochs; self.lr=lr
     def fit(self, X, y=None):
-        # Full-batch gradient descent recomputes several (n x d)/(n x h)
-        # arrays on every epoch. At 10M+ training rows and 50 epochs this
-        # OOM'd the process outright even in isolation. A bounded random
-        # subsample gives the same converged weights (full-batch GD on a
-        # large-enough sample approximates full-batch GD on the whole
-        # set) while keeping every epoch's working set small.
         self.sc_ = StandardScaler().fit(X)
         Xsub, _ = _subsample(X, max_n=20000)
         Xs = self.sc_.transform(Xsub)
@@ -674,13 +549,9 @@ class AD_E85_AutoencoderTanh(BaseAlgorithm):
 
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# F. ECOLOGICAL / MOVEMENT-SPECIFIC  (#91 – #100)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class AD_F91_VelocityJerk(BaseAlgorithm):
-    """F91 — High jerk (3rd derivative of speed) = abrupt change."""
     name = "AD F91 Velocity Jerk"
     service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
     description = "Jerk (3rd-order derivative of speed) anomaly detection"
@@ -700,7 +571,6 @@ class AD_F91_VelocityJerk(BaseAlgorithm):
 
 @registry.register
 class AD_F93_AltitudeDrop(BaseAlgorithm):
-    """F93 — Sudden altitude drop (crash/dive detection)."""
     name = "AD F93 Altitude Drop"
     service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
     description = "Sudden negative altitude change as anomaly"
@@ -723,7 +593,6 @@ class AD_F93_AltitudeDrop(BaseAlgorithm):
 
 @registry.register
 class AD_F97_MultiFeatureTemporalChange(BaseAlgorithm):
-    """F97 — Cumulative absolute first-differences across features."""
     name = "AD F97 Multi-Feature Temporal Change"
     service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
     description = "Sum of absolute temporal differences across all features"
@@ -743,14 +612,13 @@ class AD_F97_MultiFeatureTemporalChange(BaseAlgorithm):
 
 @registry.register
 class AD_F100_CompositeMovementScore(BaseAlgorithm):
-    """F100 — Composite movement anomaly: z-sum over key features."""
     name = "AD F100 Composite Movement Score"
     service_id = 4; category = "F_ecological"; library = "numpy"; animals = ["all"]
     description = "Composite z-score across speed, altitude, turning, step_length"
 
     def __init__(self): super().__init__()
     def fit(self, X, y=None):
-        cols = [0, 1, 2, 6]  # speed, altitude, turning_angle, step_length
+        cols = [0, 1, 2, 6]
         Xs = X[:, cols]
         self.mu_ = Xs.mean(0); self.sd_ = Xs.std(0) + 1e-12
         self.thr_ = _thr(np.abs((Xs - self.mu_) / self.sd_).sum(1))
@@ -759,9 +627,3 @@ class AD_F100_CompositeMovementScore(BaseAlgorithm):
         Xs = X[:, [0, 1, 2, 6]]
         return (np.abs((Xs - self.mu_) / self.sd_).sum(1) > self.thr_).astype(float)
 
-
-# ── End of file ───────────────────────────────────────────────────────────────
-# Total: 100 algorithms across 6 families
-# Service ID: 4 — Anomaly Detection (Dua)
-# Add to main.py:
-#   from vebita_framework.services.s4_anomaly.dua_algorithms import *

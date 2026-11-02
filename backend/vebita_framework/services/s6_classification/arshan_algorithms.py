@@ -1,24 +1,3 @@
-"""
-services/s6_classification/arshan_algorithms.py
-================================================
-VEBITA — Service 6: Behavioural State Classification (Arshan)
-
-21 algorithms across 7 categories:
-  A. Linear & Statistical         (3 algorithms)
-  B. Tree & Ensemble              (3 algorithms)
-  C. Kernel & Distance-Based      (3 algorithms)
-  D. Probabilistic & Bayesian     (3 algorithms)
-  E. Deep Learning                (3 algorithms)
-  F. Ecological-Specific          (3 algorithms)
-  G. Advanced Boosting            (3 algorithms)
-
-Feature matrix X shape: (n_points, 8)
-  [0] speed_ms  [1] altitude_m  [2] turning_angle  [3] straightness
-  [4] speed_roll_mean  [5] speed_roll_std  [6] step_length_m  [7] alt_roll_mean
-
-predict() returns a 1-D float array of integer class labels, same length as X.
-Service ID: 6
-"""
 
 import numpy as np
 from scipy.spatial.distance import cdist
@@ -55,9 +34,6 @@ from core.base import BaseAlgorithm
 from core.registry import registry
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SHARED HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
 
 def _y(y, n):
     if y is not None and len(y) == n:
@@ -103,13 +79,9 @@ def _subsample(X, y=None, max_n=20000, seed=42):
     return X[idx], (np.asarray(y)[idx] if y is not None else None)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# A. LINEAR & STATISTICAL  (3 algorithms)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class BC_A01_LogisticRegression(BaseAlgorithm):
-    """A01 — Multinomial logistic regression."""
     name = "BC A01 Logistic Regression"
     service_id = 6; category = "A_linear"; library = "sklearn"; animals = ["all"]
     description = "Multinomial LR: linear decision boundaries between behaviour states"
@@ -127,7 +99,6 @@ class BC_A01_LogisticRegression(BaseAlgorithm):
 
 @registry.register
 class BC_A05_LDA(BaseAlgorithm):
-    """A05 — Linear Discriminant Analysis."""
     name = "BC A05 LDA"
     service_id = 6; category = "A_linear"; library = "sklearn"; animals = ["all"]
     description = "LDA maximally separates behaviour classes by linear combination"
@@ -145,14 +116,10 @@ class BC_A05_LDA(BaseAlgorithm):
 
 @registry.register
 class BC_A29_SpeedAltitudeRules(BaseAlgorithm):
-    """A29 — Expert rule-based classifier (speed + altitude thresholds)."""
     name = "BC A29 Expert Rules"
     service_id = 6; category = "A_linear"; library = "numpy"; animals = ["all"]
     description = "Domain rules: speed/altitude percentile thresholds → states"
 
-    # Species-aware absolute speed thresholds (m/s).
-    # Percentile-of-this-dataset ignores that migratory birds are fast in general;
-    # using absolute thresholds keeps labels ecologically meaningful across species.
     _SPECIES_THRESHOLDS = {
         "african cuckoo":      (0.05, 0.3, 3.0),
         "common cuckoo":       (0.05, 0.3, 3.0),
@@ -164,7 +131,7 @@ class BC_A29_SpeedAltitudeRules(BaseAlgorithm):
         "zebra":               (0.1,  0.5, 2.0),
         "lion":                (0.05, 0.4, 2.5),
     }
-    _DEFAULT_THRESHOLDS = (0.05, 0.3, 2.0)  # resting / foraging / traveling
+    _DEFAULT_THRESHOLDS = (0.05, 0.3, 2.0)
 
     def __init__(self):
         super().__init__()
@@ -182,19 +149,15 @@ class BC_A29_SpeedAltitudeRules(BaseAlgorithm):
         sp, al = X[:, 0], X[:, 1]
         labels = np.zeros(len(X), dtype=int)
         low, mid, high = self.sp_[0], self.sp_[1], self.sp_[2]
-        labels[(sp >= low) & (sp < mid)]                 = 1   # Foraging
-        labels[(sp >= mid) & (sp < high) & (al < self.al_)] = 2   # Traveling
-        labels[(sp >= high) | ((sp >= mid) & (al >= self.al_))] = 3   # Migrating
+        labels[(sp >= low) & (sp < mid)]                 = 1
+        labels[(sp >= mid) & (sp < high) & (al < self.al_)] = 2
+        labels[(sp >= high) | ((sp >= mid) & (al >= self.al_))] = 3
         return labels.astype(float)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# B. TREE & ENSEMBLE  (3 algorithms)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class BC_B34_RandomForest100(BaseAlgorithm):
-    """B34 — Random Forest (100 trees)."""
     name = "BC B34 Random Forest 100"
     service_id = 6; category = "B_tree"; library = "sklearn"; animals = ["all"]
     description = "RF ensemble of 100 trees — robust behaviour classification"
@@ -213,7 +176,6 @@ class BC_B34_RandomForest100(BaseAlgorithm):
 
 @registry.register
 class BC_B37_GBM(BaseAlgorithm):
-    """B37 — Gradient Boosting Machine."""
     name = "BC B37 Gradient Boosting"
     service_id = 6; category = "B_tree"; library = "sklearn"; animals = ["all"]
     description = "Sequential boosting corrects misclassified behaviour states"
@@ -233,7 +195,6 @@ class BC_B37_GBM(BaseAlgorithm):
 
 @registry.register
 class BC_B39_XGBoost(BaseAlgorithm):
-    """B39 — XGBoost Classifier."""
     name = "BC B39 XGBoost"
     service_id = 6; category = "B_tree"; library = "xgboost"; animals = ["all"]
     description = "XGBoost regularised gradient boosting for behaviour"
@@ -259,13 +220,9 @@ class BC_B39_XGBoost(BaseAlgorithm):
         return self.m.predict(X).astype(float)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# C. KERNEL & DISTANCE-BASED  (3 algorithms)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class BC_C56_SVM_RBF(BaseAlgorithm):
-    """C56 — SVM with RBF kernel."""
     name = "BC C56 SVM RBF"
     service_id = 6; category = "C_kernel"; library = "sklearn"; animals = ["all"]
     description = "RBF-SVM: curved decision boundaries between behaviour states"
@@ -284,7 +241,6 @@ class BC_C56_SVM_RBF(BaseAlgorithm):
 
 @registry.register
 class BC_C63_KNN7(BaseAlgorithm):
-    """C63 — k-NN (k=7)."""
     name = "BC C63 kNN k=7"
     service_id = 6; category = "C_kernel"; library = "sklearn"; animals = ["all"]
     description = "7-NN majority vote — smoother, less noisy behaviour labels"
@@ -317,7 +273,6 @@ class BC_C63_KNN7(BaseAlgorithm):
 
 @registry.register
 class BC_C69_MahalanobisClassifier(BaseAlgorithm):
-    """C69 — Mahalanobis distance nearest-class classifier."""
     name = "BC C69 Mahalanobis Classifier"
     service_id = 6; category = "C_kernel"; library = "numpy"; animals = ["all"]
     description = "Assigns fix to class with smallest Mahalanobis distance"
@@ -346,13 +301,9 @@ class BC_C69_MahalanobisClassifier(BaseAlgorithm):
         return self.classes_[np.argmin(dists, axis=1)].astype(float)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# D. PROBABILISTIC & BAYESIAN  (3 algorithms)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class BC_D72_HMM4(BaseAlgorithm):
-    """D72 — 4-State HMM (foraging / migration / roosting / soaring)."""
     name = "BC D72 HMM 4-State"
     service_id = 6; category = "D_probabilistic"; library = "numpy"; animals = ["all"]
     description = "4-state Gaussian HMM — gold standard for bird behaviour"
@@ -398,7 +349,6 @@ class BC_D72_HMM4(BaseAlgorithm):
 
 @registry.register
 class BC_D77_GMMClassifier(BaseAlgorithm):
-    """D77 — Per-class GMM classifier."""
     name = "BC D77 GMM Classifier"
     service_id = 6; category = "D_probabilistic"; library = "sklearn"; animals = ["all"]
     description = "Per-class GMM: each behaviour has its own mixture"
@@ -428,7 +378,6 @@ class BC_D77_GMMClassifier(BaseAlgorithm):
 
 @registry.register
 class BC_D80_KalmanGMM(BaseAlgorithm):
-    """D80 — Kalman-smoothed features + GMM decoder."""
     name = "BC D80 Kalman + GMM"
     service_id = 6; category = "D_probabilistic"; library = "sklearn"; animals = ["all"]
     description = "Kalman-smoothed GPS features fed into GMM for behaviour"
@@ -466,13 +415,9 @@ class BC_D80_KalmanGMM(BaseAlgorithm):
         return np.array([self.mapping_.get(r, 0) for r in raw], dtype=float)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# E. DEEP LEARNING  (3 algorithms)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class BC_E81_MLP(BaseAlgorithm):
-    """E81 — 2-hidden-layer MLP classifier."""
     name = "BC E81 MLP"
     service_id = 6; category = "E_deep"; library = "numpy"; animals = ["all"]
     description = "2-layer neural network trained on movement features"
@@ -510,7 +455,6 @@ class BC_E81_MLP(BaseAlgorithm):
 
 @registry.register
 class BC_E83_LSTM(BaseAlgorithm):
-    """E83 — LSTM classifier."""
     name = "BC E83 LSTM"
     service_id = 6; category = "E_deep"; library = "numpy"; animals = ["all"]
     description = "LSTM gating captures long-range behaviour context"
@@ -521,8 +465,6 @@ class BC_E83_LSTM(BaseAlgorithm):
 
     def fit(self, X, y=None):
         y_ = _y(y, len(X)); K = len(np.unique(y_)); self.K_ = K
-        # Use contiguous sliding windows instead of striding over the whole track,
-        # which destroys the temporal context the LSTM is supposed to exploit.
         SEQ_LEN = 30; MAX_SEQS = 500
         n = len(X); n_seqs = min(MAX_SEQS, max(1, n - SEQ_LEN))
         starts = np.random.RandomState(42).choice(max(1, n - SEQ_LEN), n_seqs, replace=n_seqs > n - SEQ_LEN)
@@ -569,7 +511,6 @@ class BC_E83_LSTM(BaseAlgorithm):
 
 @registry.register
 class BC_E87_TCN(BaseAlgorithm):
-    """E87 — Temporal Convolutional Network (dilated causal convolutions)."""
     name = "BC E87 TCN"
     service_id = 6; category = "E_deep"; library = "numpy"; animals = ["all"]
     description = "Dilated causal convolutions capture multi-scale behaviour"
@@ -589,8 +530,6 @@ class BC_E87_TCN(BaseAlgorithm):
         self.Wout_ = np.random.randn(self.nf, K) * 0.1
         self.bout_ = np.zeros(K)
 
-        # Train: subsample then run 20 epochs of stochastic gradient descent on the
-        # TCN output logits. Without this the weights stay random and accuracy is ~25%.
         lr = 0.01; n_epochs = 20
         Xs, ys = _subsample(X, y_, max_n=10000)
         n = len(Xs)
@@ -629,13 +568,9 @@ class BC_E87_TCN(BaseAlgorithm):
         return np.argmax(a @ self.Wout_ + self.bout_, axis=1).astype(float)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# F. ECOLOGICAL-SPECIFIC  (3 algorithms)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class BC_F105_HMMRFHybrid(BaseAlgorithm):
-    """F105 — Hybrid HMM + Random Forest (temporal + spatial)."""
     name = "BC F105 HMM+RF Hybrid"
     service_id = 6; category = "F_ecological"; library = "sklearn"; animals = ["all"]
     description = "RF for instant behaviour + HMM Viterbi for temporal coherence"
@@ -671,7 +606,6 @@ class BC_F105_HMMRFHybrid(BaseAlgorithm):
 
 @registry.register
 class BC_F106_MigrationSpeedClassifier(BaseAlgorithm):
-    """F106 — Migration vs residency classifier using speed + straightness."""
     name = "BC F106 Migration Speed Classifier"
     service_id = 6; category = "F_ecological"; library = "sklearn"; animals = ["all"]
     description = "Ecologically-motivated: high speed + high straightness = migration"
@@ -682,10 +616,9 @@ class BC_F106_MigrationSpeedClassifier(BaseAlgorithm):
         self.classes_ = None
 
     def fit(self, X, y=None):
-        # Build ecological features: migration score = speed × straightness
         y_ = _y(y, len(X))
-        mig_score = X[:, 0] * X[:, 3]   # speed_ms × straightness
-        alt_change = np.abs(np.gradient(X[:, 1]))  # altitude change rate
+        mig_score = X[:, 0] * X[:, 3]
+        alt_change = np.abs(np.gradient(X[:, 1]))
         eco = np.column_stack([mig_score, alt_change, X[:, 4], X[:, 6]])
         self.m.fit(eco, y_)
         self.classes_ = np.unique(y_)
@@ -700,7 +633,6 @@ class BC_F106_MigrationSpeedClassifier(BaseAlgorithm):
 
 @registry.register
 class BC_F107_RestingForagingClassifier(BaseAlgorithm):
-    """F107 — Resting vs foraging vs travelling via turning angle bands."""
     name = "BC F107 Turning Angle Classifier"
     service_id = 6; category = "F_ecological"; library = "sklearn"; animals = ["all"]
     description = "Turning angle + step length bands map to resting/foraging/travel"
@@ -711,7 +643,6 @@ class BC_F107_RestingForagingClassifier(BaseAlgorithm):
 
     def fit(self, X, y=None):
         y_ = _y(y, len(X))
-        # Ecological features: turning angle, step length, speed variation
         turn = X[:, 2]; step = X[:, 6]; spd_std = X[:, 5]
         sinuosity = np.where(step > 0, turn / (step + 1e-6), 0.0)
         eco = np.column_stack([turn, step, spd_std, sinuosity, X[:, 0]])
@@ -725,13 +656,9 @@ class BC_F107_RestingForagingClassifier(BaseAlgorithm):
         return self.m.predict(eco).astype(float)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# G. ADVANCED BOOSTING  (3 algorithms)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class BC_G01_AdaBoost(BaseAlgorithm):
-    """G01 — AdaBoost classifier."""
     name = "BC G01 AdaBoost"
     service_id = 6; category = "G_advanced_boosting"; library = "sklearn"; animals = ["all"]
     description = "Adaptive boosting: reweights misclassified GPS fixes each round"
@@ -751,7 +678,6 @@ class BC_G01_AdaBoost(BaseAlgorithm):
 
 @registry.register
 class BC_G02_HistGradientBoosting(BaseAlgorithm):
-    """G02 — Histogram Gradient Boosting (sklearn's fastest tree boosting)."""
     name = "BC G02 Hist Gradient Boosting"
     service_id = 6; category = "G_advanced_boosting"; library = "sklearn"; animals = ["all"]
     description = "Histogram-based GBM — fastest sklearn booster for large GPS datasets"
@@ -763,8 +689,6 @@ class BC_G02_HistGradientBoosting(BaseAlgorithm):
                                                  random_state=42)
 
     def fit(self, X, y=None):
-        # HistGradientBoosting natively handles large n via histogram bins
-        # so no subsampling needed — it already scales well.
         self.m.fit(X, _y(y, len(X))); self.is_fitted = True; return self
 
     def predict(self, X):
@@ -773,7 +697,6 @@ class BC_G02_HistGradientBoosting(BaseAlgorithm):
 
 @registry.register
 class BC_G03_CatBoost(BaseAlgorithm):
-    """G03 — CatBoost Classifier."""
     name = "BC G03 CatBoost"
     service_id = 6; category = "G_advanced_boosting"; library = "catboost"; animals = ["all"]
     description = "CatBoost ordered boosting — strong accuracy with minimal tuning"
@@ -798,13 +721,3 @@ class BC_G03_CatBoost(BaseAlgorithm):
         return self.m.predict(X).astype(float)
 
 
-# ── End of file ───────────────────────────────────────────────────────────────
-# Total: 21 algorithms across 7 categories
-#   A. Linear & Statistical      : 3  (Logistic Regression, LDA, Expert Rules)
-#   B. Tree & Ensemble           : 3  (Random Forest, GBM, XGBoost)
-#   C. Kernel & Distance-Based   : 3  (SVM RBF, kNN k=7, Mahalanobis)
-#   D. Probabilistic & Bayesian  : 3  (HMM 4-State, GMM Classifier, Kalman+GMM)
-#   E. Deep Learning             : 3  (MLP, LSTM, TCN)
-#   F. Ecological-Specific       : 3  (HMM+RF Hybrid, Migration Speed, Turning Angle)
-#   G. Advanced Boosting         : 3  (AdaBoost, HistGradientBoosting, CatBoost)
-# Service ID: 6

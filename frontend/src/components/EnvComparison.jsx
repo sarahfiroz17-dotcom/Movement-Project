@@ -41,7 +41,6 @@ function pearson(a, b) {
   return da && db ? num / Math.sqrt(da * db) : 0
 }
 
-// Solo mode: bar chart of mean score per dominant env factor
 function SoloView({ results }) {
   const nameA   = results.algo_a?.name?.replace(/^Env\s/, '') || 'Algorithm'
   const descA   = results.algo_a?.score_label || ''
@@ -51,7 +50,7 @@ function SoloView({ results }) {
   const labelNames = results.label_names || []
   const stages = results.stages || []
 
-  // Mean score per dominant env factor
+  
   const factorBarRef = useRef()
   const factorBarChart = useRef()
   useEffect(() => {
@@ -59,10 +58,10 @@ function SoloView({ results }) {
     if (factorBarChart.current) factorBarChart.current.destroy()
 
     const names = envFactors.names
-    const values = envFactors.values  // n × 12
+    const values = envFactors.values  
     const n = Math.min(scoresA.length, values.length)
 
-    // Group: for each fix find which factor is highest, accumulate score
+    
     const factorScoreSum = new Array(names.length).fill(0)
     const factorCount    = new Array(names.length).fill(0)
     for (let i = 0; i < n; i++) {
@@ -101,12 +100,12 @@ function SoloView({ results }) {
     return () => { factorBarChart.current?.destroy() }
   }, [results])
 
-  // Stage breakdown
+  
   const stageColors = ['#378ADD', '#5DCAA5', '#EF9F27', '#D85A30']
   const stageCounts = labelNames.map((_, i) => stages.filter(s => s === i).length)
   const total = stages.length || 1
 
-  // Auto-generated insight
+  
   const soloInsightLines = []
   const vals   = scoresA.filter(v => !isNaN(v))
   const meanSc = vals.length > 0 ? vals.reduce((s,v)=>s+v,0)/vals.length : null
@@ -129,7 +128,7 @@ function SoloView({ results }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-      {/* Stat cards */}
+      
       <div className="metrics-row">
         <div className="mcard">
           <div className="mcard-val accent">{scoresA.length > 0 ? (scoresA.reduce((s,v)=>s+v,0)/scoresA.length).toFixed(3) : '—'}</div>
@@ -145,7 +144,7 @@ function SoloView({ results }) {
         </div>
       </div>
 
-      {/* Auto-generated insight */}
+      
       <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
         <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>
         <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, margin: 0 }}>
@@ -163,7 +162,7 @@ function SoloView({ results }) {
         )}
       </div>
 
-      {/* Mean score per dominant factor */}
+      
       {envFactors?.names && (
         <div className="panel">
           <div className="panel-title">Mean score by dominant environmental factor</div>
@@ -177,7 +176,7 @@ function SoloView({ results }) {
         </div>
       )}
 
-      {/* Stage breakdown */}
+      
       {labelNames.length > 0 && stages.length > 0 && (
         <div className="panel">
           <div className="panel-title">Movement stage breakdown</div>
@@ -217,15 +216,15 @@ export default function EnvComparison({ results }) {
   const catA    = results.algo_a?.category || ''
   const catB    = results.algo_b?.category || ''
 
-  // Pearson correlation
+  
   const corr = pearson(scoresA, scoresB).toFixed(3)
 
-  // Score difference distribution (20 bins, range -1 to 1)
+  
   const BINS = 20
   const diffBins = new Array(BINS).fill(0)
   const n = Math.min(scoresA.length, scoresB.length)
   for (let i = 0; i < n; i++) {
-    const d = (scoresA[i] - scoresB[i] + 1) / 2  // map -1..1 → 0..1
+    const d = (scoresA[i] - scoresB[i] + 1) / 2  
     diffBins[Math.min(Math.floor(d * BINS), BINS - 1)]++
   }
   const diffLabels = Array.from({ length: BINS }, (_, i) => ((i / BINS * 2) - 1).toFixed(1))
@@ -255,7 +254,7 @@ export default function EnvComparison({ results }) {
     },
   }, [results])
 
-  // Score A vs Score B scatter (sampled)
+  
   const MAX = 400
   const step = Math.max(1, Math.floor(n / MAX))
   const scatter = []
@@ -288,7 +287,7 @@ export default function EnvComparison({ results }) {
   const corrStrength = Math.abs(+corr) > 0.7 ? 'Strong' : Math.abs(+corr) > 0.4 ? 'Moderate' : 'Weak'
   const corrDir = +corr >= 0 ? 'positive' : 'negative'
 
-  // Auto-generated insight
+  
   const compInsightLines = []
   const corrNum = parseFloat(corr)
   if (Math.abs(corrNum) > 0.7)
@@ -306,7 +305,7 @@ export default function EnvComparison({ results }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-      {/* Stat cards */}
+      
       <div className="metrics-row">
         <div className="mcard">
           <div className="mcard-val accent">{corr}</div>
@@ -328,7 +327,7 @@ export default function EnvComparison({ results }) {
         </div>
       </div>
 
-      {/* Auto-generated insight */}
+      
       <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
         <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>
         <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, margin: 0 }}>
@@ -336,7 +335,7 @@ export default function EnvComparison({ results }) {
         </p>
       </div>
 
-      {/* Algorithm descriptions with category explanation */}
+      
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         <div className="panel">
           <div className="panel-title" style={{ color: COLOR_A }}>A — {nameA}</div>
@@ -360,7 +359,7 @@ export default function EnvComparison({ results }) {
         </div>
       </div>
 
-      {/* Score A vs B scatter */}
+      
       <div className="panel">
         <div className="panel-title">Score A vs Score B — do they agree per GPS fix?</div>
         <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 8 }}>
@@ -372,7 +371,7 @@ export default function EnvComparison({ results }) {
         </div>
       </div>
 
-      {/* Difference histogram */}
+      
       <div className="panel">
         <div className="panel-title">Score difference distribution</div>
         <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 8 }}>

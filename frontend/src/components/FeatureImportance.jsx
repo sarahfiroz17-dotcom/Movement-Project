@@ -75,7 +75,7 @@ export default function FeatureImportance({ results }) {
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
 
-        {/* Ranked list */}
+        
         <div className="panel">
           <div className="panel-title">
             Feature importance ranking
@@ -97,7 +97,7 @@ export default function FeatureImportance({ results }) {
           </div>
         </div>
 
-        {/* Horizontal bar chart */}
+        
         <div className="panel">
           <div className="panel-title">Feature importance chart</div>
           <div style={{ position: 'relative', height: 300 }}>
@@ -106,7 +106,7 @@ export default function FeatureImportance({ results }) {
         </div>
       </div>
 
-      {/* Top-3 insight cards */}
+      
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
         {ranked.slice(0, 3).map((r, i) => (
           <div key={r.name} className="panel" style={{ padding: 12 }}>

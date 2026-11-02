@@ -68,7 +68,7 @@ function AlgoMap({ results, which, stageMode }) {
         if (lats[k] != null && lons[k] != null) idxs.push(k)
       }
 
-      // Track line
+      
       const trackPoints = idxs.map(i => [lats[i], lons[i]])
       if (trackPoints.length > 1) {
         Lv.polyline(trackPoints, { color: '#378ADD', weight: 1.5, opacity: 0.3, dashArray: '4 3' }).addTo(map)
@@ -77,12 +77,12 @@ function AlgoMap({ results, which, stageMode }) {
       if (isRegression) {
         idxs.forEach((i) => {
           const score      = scores[i]
-          if (score == null) return  // training fix — skip coloured dot
+          if (score == null) return  
           const stageIdx   = stages[i] ?? -1
           const stageName  = stageIdx >= 0 && labelNames[stageIdx] ? labelNames[stageIdx] : ''
           const stageColor = stageIdx >= 0 ? STAGE_COLORS[stageIdx % STAGE_COLORS.length] : '#888'
 
-          // Top env factor for popup
+          
           let topFactor = ''
           if (envFactors?.names && envFactors.values?.[i]) {
             const row = envFactors.values[i]
@@ -115,7 +115,7 @@ function AlgoMap({ results, which, stageMode }) {
       } else {
         idxs.forEach(i => {
           const cluster = preds[i]
-          if (cluster == null) return  // training fix — skip
+          if (cluster == null) return  
           const color   = CLUSTER_COLORS[cluster % CLUSTER_COLORS.length]
           const label   = labelNames[cluster] || `Cluster ${cluster}`
           bounds.push([lats[i], lons[i]])
@@ -165,7 +165,7 @@ function AlgoMap({ results, which, stageMode }) {
                   border: `1px solid ${which === 'a' ? '#1D9E7540' : '#534AB740'}`,
                   borderRadius: 10, overflow: 'hidden', background: 'var(--surface)' }}>
 
-      {/* Header */}
+      
       <div style={{ padding: '10px 14px 8px', borderBottom: '1px solid var(--border)',
                     background: which === 'a' ? '#0d1f17' : '#100d21' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
@@ -182,7 +182,7 @@ function AlgoMap({ results, which, stageMode }) {
           </div>
         </div>
 
-        {/* Regression: show gradient bar OR stage legend depending on mode */}
+        
         {isRegression && !stageMode && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 10, color: 'var(--text3)' }}>Low</span>
@@ -205,7 +205,7 @@ function AlgoMap({ results, which, stageMode }) {
           </div>
         )}
 
-        {/* Classification legend */}
+        
         {!isRegression && legendItems.length > 0 && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px' }}>
             {legendItems.map(({ label, color }) => (
@@ -218,7 +218,7 @@ function AlgoMap({ results, which, stageMode }) {
         )}
       </div>
 
-      {/* Map */}
+      
       <div ref={mapRef} style={{ flex: 1, minHeight: 340, background: '#0a0a10' }} />
     </div>
   )
@@ -242,7 +242,7 @@ export default function SplitMapView({ results }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
 
-      {/* Metric summary row */}
+      
       <div className="metrics-row" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
         <div className="mcard">
           <div className="mcard-val accent">
@@ -281,7 +281,7 @@ export default function SplitMapView({ results }) {
         </div>
       </div>
 
-      {/* Stage mode toggle — S3 only */}
+      
       {isRegression && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 11, color: 'var(--text3)' }}>Colour by:</span>
@@ -298,7 +298,7 @@ export default function SplitMapView({ results }) {
         </div>
       )}
 
-      {/* Split maps */}
+      
       <div style={{ display: 'flex', gap: 10, height: 460 }}>
         <AlgoMap results={results} which="a" stageMode={stageMode} />
         <AlgoMap results={results} which="b" stageMode={stageMode} />

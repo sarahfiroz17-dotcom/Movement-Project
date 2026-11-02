@@ -26,7 +26,7 @@ export default function History({ onLoad }) {
     if (chart.current) chart.current.destroy()
     const rows    = [...history].reverse()
     const labels  = rows.map((_, i) => `Run ${i + 1}`)
-    // null = regression run (no F1) — Chart.js renders these as gaps in the line
+    
     const f1aVals = rows.map(r => r.f1_a ?? null)
     const f1bVals = rows.map(r => r.f1_b ?? null)
     chart.current = new Chart(chartRef.current, {
@@ -80,7 +80,7 @@ export default function History({ onLoad }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-      {/* Trend chart */}
+      
       <div className="panel">
         <div className="panel-title">
           F1 score trend — classification runs (regression runs show as gaps)
@@ -102,7 +102,7 @@ export default function History({ onLoad }) {
         )}
       </div>
 
-      {/* History table */}
+      
       <div className="panel">
         <div className="panel-title">
           All analysis runs
@@ -132,7 +132,7 @@ export default function History({ onLoad }) {
                   const totalRt = ((row.runtime_a || 0) + (row.runtime_b || 0)).toFixed(1)
                   return (
                     <tr key={row.id} style={{ cursor: 'pointer' }}
-                        onClick={() => {/* could load result detail */}}>
+                        onClick={() => }>
                       <td style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {row.dataset_name}
                       </td>

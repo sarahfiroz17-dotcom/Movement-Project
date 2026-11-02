@@ -31,7 +31,7 @@ export default function F1Scores({ results }) {
     const f1aVals = classes.map(c => algo_a?.per_class_f1?.[c] ?? null)
     const f1bVals = classes.map(c => algo_b?.per_class_f1?.[c] ?? null)
 
-    // Grouped bar
+    
     if (barRef.current) {
       if (barChart.current) barChart.current.destroy()
       barChart.current = new Chart(barRef.current, {
@@ -57,7 +57,7 @@ export default function F1Scores({ results }) {
       })
     }
 
-    // Radar for algo_a — precision / recall / f1 per class
+    
     if (radarRef.current && classes.length >= 3) {
       if (radarChart.current) radarChart.current.destroy()
       radarChart.current = new Chart(radarRef.current, {
@@ -111,7 +111,7 @@ export default function F1Scores({ results }) {
 
   const winnerA = (algo_a?.f1 ?? 0) >= (algo_b?.f1 ?? 0)
 
-  // Auto-generated insight
+  
   const f1aVals = classes.map(c => algo_a?.per_class_f1?.[c] ?? null)
   const f1bVals = classes.map(c => algo_b?.per_class_f1?.[c] ?? null)
   const zeroF1Classes = classes.filter((c, i) => f1aVals[i] === 0 || f1aVals[i] === null)
@@ -141,7 +141,7 @@ export default function F1Scores({ results }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-      {/* Summary cards */}
+      
       <div className="metrics-row">
         <div className="mcard">
           <div className="mcard-val accent">{algo_a?.f1 != null ? algo_a.f1.toFixed(3) : '—'}</div>
@@ -169,7 +169,7 @@ export default function F1Scores({ results }) {
         </div>
       </div>
 
-      {/* Auto-generated insight */}
+      
       {insightLines.length > 0 && (
         <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
           <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>
@@ -179,7 +179,7 @@ export default function F1Scores({ results }) {
         </div>
       )}
 
-      {/* Side-by-side result cards — compare mode only */}
+      
       {compareMode && (
       <div className="compare-grid">
         <div className={`result-card${winnerA ? ' winner' : ''}`}>
@@ -201,7 +201,7 @@ export default function F1Scores({ results }) {
               <span className="score-num">{override || (val != null ? val.toFixed(2) : '—')}</span>
             </div>
           ))}
-          {/* Per-class breakdown */}
+          
           {Object.keys(algo_a?.per_class_f1 || {}).length > 0 && (
             <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
               <div style={{ fontSize: 10, color: 'var(--text3)', marginBottom: 6 }}>Per-class F1</div>
@@ -253,7 +253,7 @@ export default function F1Scores({ results }) {
       </div>
       )}
 
-      {/* Bar chart + radar */}
+      
       <div className="compare-grid">
         <div className="panel">
           <div className="panel-title">
@@ -282,7 +282,7 @@ export default function F1Scores({ results }) {
         </div>
       </div>
 
-      {/* Full table */}
+      
       <div className="panel">
         <div className="panel-title">Full metrics table</div>
         <table className="vtable">

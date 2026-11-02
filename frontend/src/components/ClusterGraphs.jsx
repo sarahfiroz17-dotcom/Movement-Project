@@ -55,12 +55,11 @@ function computeTurnHistogram(preds, turns, labelNames, clusterLabels, colors) {
   return { binLabels: binEdges.map(e => `${e}°`), datasets }
 }
 
-// ── Auto-generated plain-English insight (S6 only) ───────────────────────────
 function generateBehaviourInsight({ clusterLabels, clusterVals, meanSpeedOrdered, totalAll, algo_a }) {
   const sentences = []
   const pct = i => Math.round((clusterVals[i] / totalAll) * 100)
 
-  // 1. Overall accuracy if available
+  
   const acc = algo_a?.accuracy
   if (acc != null) {
     if (acc > 0.85) {
@@ -72,7 +71,7 @@ function generateBehaviourInsight({ clusterLabels, clusterVals, meanSpeedOrdered
     }
   }
 
-  // 2. Dominant behaviour
+  
   const maxIdx = clusterVals.indexOf(Math.max(...clusterVals))
   const domLabel = clusterLabels[maxIdx]
   const domPct   = pct(maxIdx)
@@ -87,7 +86,7 @@ function generateBehaviourInsight({ clusterLabels, clusterVals, meanSpeedOrdered
   const stagePlain = STAGE_PLAIN[domLabel] || `The most common behaviour is "${domLabel}" (${domPct}% of GPS fixes).`
   sentences.push(stagePlain + (STAGE_PLAIN[domLabel] ? ` It accounts for ${domPct}% of the route.` : ''))
 
-  // 3. Speed interpretation
+  
   if (domSpeed != null) {
     if (domSpeed < 0.3) {
       sentences.push(`The average speed during this stage is very low (${domSpeed.toFixed(2)} m/s), consistent with resting or slow grazing.`)
@@ -98,7 +97,7 @@ function generateBehaviourInsight({ clusterLabels, clusterVals, meanSpeedOrdered
     }
   }
 
-  // 4. Minority stages
+  
   const minorities = clusterLabels
     .map((l, i) => ({ l, p: pct(i) }))
     .filter((_, i) => i !== maxIdx && pct(i) > 5)
@@ -107,7 +106,7 @@ function generateBehaviourInsight({ clusterLabels, clusterVals, meanSpeedOrdered
     sentences.push(`Other notable behaviours include ${parts}, suggesting the animal is not locked into a single activity.`)
   }
 
-  // 5. Balance / fragmentation hint
+  
   const minPct = Math.min(...clusterVals.map((_, i) => pct(i)))
   if (minPct > 15) {
     sentences.push(`All behaviour types appear with reasonable frequency, indicating a varied behavioural repertoire across this recording period.`)
@@ -167,14 +166,14 @@ export default function ClusterGraphs({ results, serviceId }) {
   const totalAll      = predsA.length
   const hiddenCount   = totalAll - clusterVals.reduce((s, v) => s + v, 0)
 
-  // Real mean speeds per cluster
+  
   const meanSpeedData = computeClusterMeans(predsA, speeds, label_names)
   const meanSpeedOrdered = clusterLabels.map(l => {
     const entry = meanSpeedData.find(e => e.label === l)
     return entry ? +entry.mean.toFixed(3) : 0
   })
 
-  // Turning angle histogram per cluster
+  
   const turnHist = computeTurnHistogram(predsA, turns, label_names, clusterLabels,
     clusterLabels.map((_, i) => CLUSTER_COLORS[i % CLUSTER_COLORS.length]))
 
@@ -236,7 +235,7 @@ export default function ClusterGraphs({ results, serviceId }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-      {/* Auto-generated insight — S6 only, at the top */}
+      
       {serviceId === 6 && (
         <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
           <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>
@@ -252,7 +251,7 @@ export default function ClusterGraphs({ results, serviceId }) {
         </div>
       )}
 
-      {/* Donut + mean speed row */}
+      
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         <div className="panel">
           <div className="panel-title">Cluster size distribution</div>
@@ -282,7 +281,7 @@ export default function ClusterGraphs({ results, serviceId }) {
         </div>
       </div>
 
-      {/* Turning angle distribution */}
+      
       <div className="panel">
         <div className="panel-title">
           Turning angle distribution per cluster
@@ -299,7 +298,7 @@ export default function ClusterGraphs({ results, serviceId }) {
         </div>
       </div>
 
-      {/* Comparison table */}
+      
       <div className="panel">
         <div className="panel-title">
           Cluster metrics{compareMode ? ` — ${nameA} vs ${nameB}` : ` — ${nameA}`}

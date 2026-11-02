@@ -1,42 +1,13 @@
-"""
-core/registry.py
-================
-VEBITA Algorithm Registry
-
-Central store for all 550+ algorithms across 6 services.
-Every algorithm auto-registers itself using the @registry.register decorator.
-
-The benchmark runner asks the registry:
-    "Give me all algorithms for service 5"
-    "Give me all clustering algorithms"
-    "Give me everything"
-
-And runs them all automatically.
-"""
-
 from typing import Dict, List, Type, Optional
 from core.base import BaseAlgorithm
 
 class AlgorithmRegistry:
-    """
-    Singleton registry. All algorithms register here at import time.
-    """
 
     def __init__(self):
-        # storage: { service_id: { algo_name: AlgoClass } }
         self._store: Dict[int, Dict[str, Type[BaseAlgorithm]]] = {}
         self._all:   Dict[str, Type[BaseAlgorithm]] = {}
 
-    # ── Registration ──────────────────────────────────────────────────────
     def register(self, cls: Type[BaseAlgorithm]) -> Type[BaseAlgorithm]:
-        """
-        Decorator that registers an algorithm class.
-
-        Usage:
-            @registry.register
-            class MyAlgo(BaseAlgorithm):
-                ...
-        """
         sid  = cls.service_id
         name = cls.name
 
@@ -53,17 +24,13 @@ class AlgorithmRegistry:
         self._all[f"S{sid}::{name}"] = cls
         return cls
 
-    # ── Querying ──────────────────────────────────────────────────────────
     def get_all(self) -> List[Type[BaseAlgorithm]]:
-        """Return all registered algorithms across all services."""
         return list(self._all.values())
 
     def get_by_service(self, service_id: int) -> List[Type[BaseAlgorithm]]:
-        """Return all algorithms for a specific service (1–6)."""
         return list(self._store.get(service_id, {}).values())
 
     def get_by_category(self, category: str) -> List[Type[BaseAlgorithm]]:
-        """Return all algorithms of a given category across all services."""
         return [
             cls for cls in self._all.values()
             if cls.category.lower() == category.lower()
@@ -71,7 +38,6 @@ class AlgorithmRegistry:
 
     def get_by_name(self, name: str,
                     service_id: Optional[int] = None) -> Optional[Type[BaseAlgorithm]]:
-        """Look up a specific algorithm by name."""
         if service_id is not None:
             return self._store.get(service_id, {}).get(name)
         for cls in self._all.values():
@@ -79,9 +45,7 @@ class AlgorithmRegistry:
                 return cls
         return None
 
-    # ── Reporting ─────────────────────────────────────────────────────────
     def summary(self) -> dict:
-        """Print a summary of all registered algorithms."""
         total = len(self._all)
         by_service = {
             sid: len(algos)
@@ -121,5 +85,4 @@ class AlgorithmRegistry:
         print(f"{'='*50}\n")
 
 
-# ── Global singleton ──────────────────────────────────────────────────────
 registry = AlgorithmRegistry()

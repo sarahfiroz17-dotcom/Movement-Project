@@ -25,14 +25,14 @@ export default function EnvProfiles({ results }) {
     </div>
   )
 
-  // Filter out nulls — full-track arrays now contain null for training fixes
+  
   const scoresA = (results.algo_a?.scores || []).filter(v => v != null)
   const scoresB = (results.algo_b?.scores || []).filter(v => v != null)
   const nameA   = results.algo_a?.name?.replace(/^Env\s/, '') || 'Algorithm A'
   const nameB   = results.algo_b?.name?.replace(/^Env\s/, '') || 'Algorithm B'
   const compareMode = results?.compareMode
 
-  // Build histogram bins (20 buckets 0–1)
+  
   const BINS = 20
   const binsA = new Array(BINS).fill(0)
   const binsB = new Array(BINS).fill(0)
@@ -64,13 +64,13 @@ export default function EnvProfiles({ results }) {
     },
   }, [results])
 
-  // Score vs altitude scatter — sample every Nth point for performance
+  
   const n = scoresA.length
   const lats = results.lats || []
   const step = Math.max(1, Math.floor(n / 300))
   const scatterA = [], scatterB = []
   for (let i = 0; i < n; i += step) {
-    // Use lat as a proxy for position (north = higher lat = different terrain)
+    
     const latVal = lats[i] ?? i / n
     scatterA.push({ x: +latVal.toFixed(4), y: +(scoresA[i] ?? 0).toFixed(3) })
     if (scoresB[i] != null) scatterB.push({ x: +latVal.toFixed(4), y: +(scoresB[i]).toFixed(3) })
@@ -96,7 +96,7 @@ export default function EnvProfiles({ results }) {
     },
   }, [results])
 
-  // Summary stats — avoid Math.min/max spread which stack-overflows on 20k items
+  
   const stats = (scores) => {
     if (!scores.length) return { mean: '—', std: '—', min: '—', max: '—' }
     let sum = 0, mn = scores[0], mx = scores[0]
@@ -119,7 +119,7 @@ export default function EnvProfiles({ results }) {
   const sA = stats(scoresA)
   const sB = stats(scoresB)
 
-  // Auto-generated insight — based on variability, not absolute mean (scores are min-max normalised so mean is always ~0.4)
+  
   const insightLines = []
   const stdA  = parseFloat(sA.std)
   const minA  = parseFloat(sA.min)
@@ -159,7 +159,7 @@ export default function EnvProfiles({ results }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-      {/* Stat cards */}
+      
       <div className="metrics-row">
         {compareMode ? (
           <>
@@ -178,7 +178,7 @@ export default function EnvProfiles({ results }) {
         )}
       </div>
 
-      {/* Auto-generated insight */}
+      
       <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
         <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>
         <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, margin: 0 }}>
@@ -186,7 +186,7 @@ export default function EnvProfiles({ results }) {
         </p>
       </div>
 
-      {/* Score distribution histogram */}
+      
       <div className="panel">
         <div className="panel-title">Score distribution — how scores are spread across all GPS fixes</div>
         <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 8 }}>
@@ -197,7 +197,7 @@ export default function EnvProfiles({ results }) {
         </div>
       </div>
 
-      {/* Score vs latitude scatter */}
+      
       <div className="panel">
         <div className="panel-title">Score vs latitude — how environment changes across the route</div>
         <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 8 }}>
@@ -208,7 +208,7 @@ export default function EnvProfiles({ results }) {
         </div>
       </div>
 
-      {/* Min/max table */}
+      
       <div className="panel">
         <div className="panel-title">Score range summary</div>
         <table className="vtable">

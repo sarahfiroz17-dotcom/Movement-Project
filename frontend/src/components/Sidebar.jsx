@@ -27,7 +27,7 @@ export default function Sidebar({
   return (
     <aside className="sidebar">
 
-      {/* ── Service ── */}
+      
       <div>
         <div className="sidebar-label">Service</div>
         {Object.entries(SERVICES).map(([id, svc]) => (
@@ -40,7 +40,7 @@ export default function Sidebar({
         ))}
       </div>
 
-      {/* ── Dataset ── */}
+      
       <div>
         <div className="sidebar-label">Dataset</div>
         <div
@@ -82,7 +82,7 @@ export default function Sidebar({
         )}
       </div>
 
-      {/* ── Algorithms ── */}
+      
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <div className="sidebar-label" style={{ marginBottom: 4 }}>
           Algorithms
@@ -91,7 +91,7 @@ export default function Sidebar({
           </span>
         </div>
 
-        {/* Selected pills */}
+        
         {(algoA || algoB) && (
           <div style={{ marginBottom: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
             {algoA && (
@@ -119,7 +119,7 @@ export default function Sidebar({
           </div>
         )}
 
-        {/* Hint text */}
+        
         {algoA && !algoB && (
           <div style={{ fontSize: 10, color: 'var(--text3)', marginBottom: 8, textAlign: 'center' }}>
             Select a second algorithm to compare side-by-side

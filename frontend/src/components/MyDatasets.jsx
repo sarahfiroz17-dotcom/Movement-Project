@@ -52,7 +52,7 @@ export default function MyDatasets({ onSelect, activeId }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-      {/* Upload zone */}
+      
       <div className="panel">
         <div className="panel-title">
           Upload new dataset
@@ -88,7 +88,7 @@ export default function MyDatasets({ onSelect, activeId }) {
         )}
       </div>
 
-      {/* Dataset list */}
+      
       <div className="panel">
         <div className="panel-title">
           Your datasets
@@ -139,7 +139,7 @@ export default function MyDatasets({ onSelect, activeId }) {
         )}
       </div>
 
-      {/* Supported animals reference */}
+      
       <div className="panel">
         <div className="panel-title">Supported animal profiles (for demo mode)</div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>

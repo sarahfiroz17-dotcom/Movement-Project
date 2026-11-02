@@ -6,7 +6,6 @@ const TICK = '#4a4a6a'
 
 const STAGE_COLORS = ['#378ADD', '#5DCAA5', '#EF9F27', '#D85A30']
 
-// Canvas-drawn stage ribbon — no Chart.js, full control over height + labels
 function StageRibbon({ stages, labelNames }) {
   const canvasRef = useRef()
 
@@ -24,14 +23,14 @@ function StageRibbon({ stages, labelNames }) {
     const n       = stages.length
     const cellW   = W / n
 
-    // Draw each stage cell as a filled rectangle
+    
     stages.forEach((s, i) => {
       const color = STAGE_COLORS[s % STAGE_COLORS.length]
       ctx.fillStyle = color
       ctx.fillRect(Math.floor(i * cellW), 0, Math.ceil(cellW) + 1, H)
     })
 
-    // Detect transitions and label each run of the same stage
+    
     let runStart = 0
     for (let i = 1; i <= n; i++) {
       if (i === n || stages[i] !== stages[runStart]) {
@@ -40,13 +39,13 @@ function StageRibbon({ stages, labelNames }) {
         const s       = stages[runStart]
         const label   = labelNames[s] || `Stage ${s}`
 
-        // Only draw label if the run is wide enough to hold it
+        
         const minWidth = label.length * 6 + 12
         if (runLen * cellW >= minWidth) {
           ctx.font      = 'bold 10px system-ui, sans-serif'
           ctx.textAlign = 'center'
           ctx.textBaseline = 'middle'
-          // Dark shadow for readability on any colour
+          
           ctx.fillStyle = 'rgba(0,0,0,0.55)'
           ctx.fillText(label, midPx + 1, H / 2 + 1)
           ctx.fillStyle = '#fff'
@@ -60,22 +59,21 @@ function StageRibbon({ stages, labelNames }) {
   return <canvas ref={canvasRef} style={{ width: '100%', height: 40, display: 'block', borderRadius: 4 }} />
 }
 
-// 3 thematic groups — indices into the 12-factor array
 const GROUPS = [
   {
     label: 'Terrain',
     color: '#EF9F27',
-    indices: [0, 1, 9, 10],   // terrain_ruggedness, slope, elevation_gradient, habitat_boundary
+    indices: [0, 1, 9, 10],   
   },
   {
     label: 'Climate & Habitat',
     color: '#5DCAA5',
-    indices: [2, 3, 5, 7],    // ndvi_proxy, land_cover, temperature_proxy, solar_radiation
+    indices: [2, 3, 5, 7],    
   },
   {
     label: 'Animal Activity',
     color: '#378ADD',
-    indices: [4, 6, 8, 11],   // wind_proxy, proximity_water, resource_score, energy_expenditure
+    indices: [4, 6, 8, 11],   
   },
 ]
 
@@ -91,7 +89,6 @@ function useChart(config, deps) {
   return ref
 }
 
-// One horizontal bar chart for a group of 4 factors
 function GroupBar({ group, factorNames, perFactor }) {
   const means = group.indices.map(fi => {
     const col = perFactor[fi]
@@ -151,13 +148,12 @@ function GroupBar({ group, factorNames, perFactor }) {
   )
 }
 
-// ── Auto-generated plain-English insight ─────────────────────────────────────
 function generateInsight({ factorMeans, stageCounts, labelNames, n }) {
   const top    = factorMeans[0]
   const second = factorMeans[1]
   const sentences = []
 
-  // 1. Top factor — use relative gap between top and bottom to assess concentration
+  
   const FACTOR_PLAIN = {
     terrain_ruggedness: 'uneven, hilly terrain',
     slope:              'steep slopes',
@@ -192,7 +188,7 @@ function generateInsight({ factorMeans, stageCounts, labelNames, n }) {
     }
   }
 
-  // 2. Terrain group check — compare terrain to non-terrain average
+  
   const terrainNames = ['terrain_ruggedness', 'slope', 'elevation_gradient']
   const terrainMeans = factorMeans.filter(f => terrainNames.includes(f.name)).map(f => f.mean)
   const nonTerrainMeans = factorMeans.filter(f => !terrainNames.includes(f.name)).map(f => f.mean)
@@ -205,7 +201,7 @@ function generateInsight({ factorMeans, stageCounts, labelNames, n }) {
     sentences.push(`Terrain factors score higher than most other signals, suggesting the landscape shape is a key driver — the animal is actively responding to hills, slopes, or elevation changes.`)
   }
 
-  // 4. Dominant movement stage
+  
   const total = stageCounts.reduce((s, v) => s + v, 0) || 1
   const domIdx = stageCounts.indexOf(Math.max(...stageCounts))
   const domPct = Math.round((stageCounts[domIdx] / total) * 100)
@@ -220,7 +216,7 @@ function generateInsight({ factorMeans, stageCounts, labelNames, n }) {
   const stagePlain = STAGE_PLAIN[domName] || `mostly in the "${domName}" stage`
   sentences.push(`Looking at movement stages, the animal is ${stagePlain} (${domPct}% of the route).`)
 
-  // 5. Fragmentation check — are stages evenly spread?
+  
   const total2 = stageCounts.reduce((s, v) => s + v, 0) || 1
   const spread = Math.max(...stageCounts) / total2
   if (n > 10 && spread < 0.5) {
@@ -251,9 +247,9 @@ export default function EnvFactors({ results }) {
   )
 
   const factorNames = envFactors.names
-  const values      = envFactors.values   // n_vis × 12 (nulls for training fixes)
+  const values      = envFactors.values   
 
-  // Filter out null entries (training fixes have no env factor data)
+  
   const testValues = values.filter(row => row != null)
   const testStages = stages.filter(s => s != null)
   const n = testValues.length
@@ -264,7 +260,7 @@ export default function EnvFactors({ results }) {
     </div>
   )
 
-  // x-axis labels — cumulative distance or fix index
+  
   const useDistance = stepsRaw.length > 0
   let xLabels = []
   if (useDistance) {
@@ -276,10 +272,10 @@ export default function EnvFactors({ results }) {
     xLabels = Array.from({ length: n }, (_, i) => i)
   }
 
-  // Transpose: one array per factor (test fixes only)
+  
   const perFactor = factorNames.map((_, fi) => testValues.map(row => +(row[fi] ?? 0).toFixed(3)))
 
-  // Factor means for stat cards + ranking
+  
   const factorMeans = factorNames.map((name, fi) => {
     const col  = perFactor[fi]
     const mean = col.reduce((s, v) => s + v, 0) / (col.length || 1)
@@ -298,7 +294,7 @@ export default function EnvFactors({ results }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-      {/* Stat cards */}
+      
       <div className="metrics-row">
         <div className="mcard">
           <div className="mcard-val accent" style={{ fontSize: 14, textTransform: 'none' }}>
@@ -322,7 +318,7 @@ export default function EnvFactors({ results }) {
         </div>
       </div>
 
-      {/* Auto-generated insight */}
+      
       <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
         <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>
         <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, margin: 0 }}>
@@ -330,7 +326,7 @@ export default function EnvFactors({ results }) {
         </p>
       </div>
 
-      {/* Stage ribbon */}
+      
       {testStages.length > 0 && (
         <div className="panel">
           <div className="panel-title">Movement stage along the route</div>
@@ -349,7 +345,7 @@ export default function EnvFactors({ results }) {
         </div>
       )}
 
-      {/* 3 grouped bar charts side by side */}
+      
       <div style={{ display: 'flex', gap: 12 }}>
         {GROUPS.map(g => (
           <GroupBar
@@ -361,7 +357,7 @@ export default function EnvFactors({ results }) {
         ))}
       </div>
 
-      {/* Factor ranking table */}
+      
       <div className="panel">
         <div className="panel-title">All factors ranked by average intensity — {nameA}</div>
         <table className="vtable">

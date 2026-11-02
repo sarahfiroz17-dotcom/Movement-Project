@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { CLUSTER_COLORS } from '../constants.js'
 
-// Green-teal heatmap for Algorithm A
 function scoreColorA(t) {
   const v = Math.max(0, Math.min(1, t))
   const r = Math.round(20  + v * 80)
@@ -10,7 +9,6 @@ function scoreColorA(t) {
   return `rgb(${r},${g},${b})`
 }
 
-// Purple heatmap for Algorithm B
 function scoreColorB(t) {
   const v = Math.max(0, Math.min(1, t))
   const r = Math.round(80  + v * 160)
@@ -29,7 +27,7 @@ export default function MapView({ results }) {
   const compareMode  = results?.compareMode
   const [showA, setShowA] = useState(true)
   const [showB, setShowB] = useState(true)
-  const [stageMode, setStageMode] = useState(true)    // S3 only: colour by stage vs env score
+  const [stageMode, setStageMode] = useState(true)    
 
   const nameA = results?.algo_a?.name?.replace(/^(Beh|Env)\s/, '') || 'Algorithm A'
   const nameB = results?.algo_b?.name?.replace(/^(Beh|Env)\s/, '') || 'Algorithm B'
@@ -39,7 +37,7 @@ export default function MapView({ results }) {
     import('leaflet').then(L => {
       const Lv = L.default || L
 
-      // Init map once
+      
       if (!leafletRef.current) {
         leafletRef.current = Lv.map(mapRef.current, {
           center: [51.0, 9.0], zoom: 7,
@@ -53,7 +51,7 @@ export default function MapView({ results }) {
 
       const map = leafletRef.current
 
-      // Clear existing layers
+      
       map.eachLayer(layer => { if (layer instanceof Lv.Marker || layer instanceof Lv.CircleMarker || layer instanceof Lv.Polyline) map.removeLayer(layer) })
 
       if (!results) return
@@ -72,11 +70,11 @@ export default function MapView({ results }) {
       const step = n > MAX_MAP_POINTS ? Math.ceil(n / MAX_MAP_POINTS) : 1
       const idxs = []
       for (let k = 0; k < n; k += step) {
-        // Skip any point where lat or lon is null/undefined (NaN from backend)
+        
         if (lats[k] != null && lons[k] != null) idxs.push(k)
       }
 
-      // GPS track line — only valid (non-null) coordinates
+      
       const trackPoints = idxs.map(i => [lats[i], lons[i]])
       if (trackPoints.length > 1) {
         Lv.polyline(trackPoints, {
@@ -85,7 +83,7 @@ export default function MapView({ results }) {
       }
 
       if (isRegression) {
-        // Small lat/lon nudge so A and B dots sit side-by-side instead of stacking
+        
         const OFFSET = 0.0003
         const both = showA && showB
         const envFactors  = results.env_factors
@@ -98,16 +96,16 @@ export default function MapView({ results }) {
           const lat = lats[i], lon = lons[i]
           bounds.push([lat, lon])
 
-          // null means this fix was in the training set — skip coloured dot
+          
           const hasA = scoreA != null
           const hasB = scoreB != null
 
-          // Stage for this fix — indexed by i (position in full-track array)
+          
           const stageIdx  = stages[i] ?? -1
           const stageName = stageIdx >= 0 && labelNames[stageIdx] ? labelNames[stageIdx] : ''
           const stageColor = stageIdx >= 0 ? STAGE_COLORS[stageIdx % STAGE_COLORS.length] : '#888'
 
-          // Top env factor for popup
+          
           let topFactor = ''
           if (envFactors?.names && envFactors.values?.[i]) {
             const row = envFactors.values[i]
@@ -148,11 +146,11 @@ export default function MapView({ results }) {
         })
 
       } else {
-        // Non-regression (S6): colour by predicted cluster; skip training fixes (null)
+        
         idxs.forEach(i => {
           const clusterA = predsAFull[i]
           const clusterB = predsBFull[i]
-          // null = training fix — show nothing (track line already drawn)
+          
           if (clusterA == null) return
           const color    = CLUSTER_COLORS[clusterA % CLUSTER_COLORS.length]
           const match    = clusterA === clusterB
@@ -177,7 +175,7 @@ export default function MapView({ results }) {
         })
       }
 
-      // Start/end markers — fit to full track so entire route is visible
+      
       if (trackPoints.length > 0) {
         const startIcon = Lv.divIcon({ html: '<div style="width:10px;height:10px;background:#5DCAA5;border-radius:50%;border:2px solid #04342C"></div>', iconSize: [10, 10], className: '' })
         const endIcon   = Lv.divIcon({ html: '<div style="width:10px;height:10px;background:#7F77DD;border-radius:50%;border:2px solid #26215C"></div>', iconSize: [10, 10], className: '' })
@@ -195,7 +193,7 @@ export default function MapView({ results }) {
   const predsA        = results?.algo_a?.predictions || []
   const clusterCounts = predsA.reduce((acc, p) => { acc[p] = (acc[p] || 0) + 1; return acc }, {})
 
-  // For the legend: use label_names if available, else top-5 clusters by count
+  
   const legendItems = labelNames.length > 0
     ? labelNames.map((name, i) => ({ label: name, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length] }))
     : Object.entries(clusterCounts)
@@ -208,7 +206,7 @@ export default function MapView({ results }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-      {/* Metric summary */}
+      
       {results && (
         <div className="metrics-row">
           <div className="mcard">
@@ -238,7 +236,7 @@ export default function MapView({ results }) {
         </div>
       )}
 
-      {/* Map */}
+      
       <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
         <div style={{ padding: '12px 14px 8px', borderBottom: '1px solid var(--border)' }}>
           <div className="panel-title" style={{ marginBottom: 6 }}>
@@ -246,7 +244,7 @@ export default function MapView({ results }) {
           </div>
           {results && isRegression && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {/* Mode toggle */}
+              
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <span style={{ fontSize: 11, color: 'var(--text3)' }}>Colour by:</span>
                 <button
@@ -269,7 +267,7 @@ export default function MapView({ results }) {
                 </button>
               </div>
 
-              {/* Env score legend */}
+              
               {!stageMode && (
                 <div style={{ display: 'flex', gap: 20, alignItems: 'center' }}>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', userSelect: 'none' }}>
@@ -304,7 +302,7 @@ export default function MapView({ results }) {
                 </div>
               )}
 
-              {/* Stage legend */}
+              
               {stageMode && (
                 <div className="legend">
                   {(results.label_names || ['Resting', 'Foraging', 'Traveling', 'Migrating']).map((lbl, i) => (
@@ -344,7 +342,7 @@ export default function MapView({ results }) {
         )}
       </div>
 
-      {/* Disagreement count — only meaningful in compare mode */}
+      
       {results && compareMode && (
         <div className="panel">
           <div className="panel-title">Algorithm agreement</div>

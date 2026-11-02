@@ -1,12 +1,3 @@
-"""
-services/s2_patterns/ritikha_algorithms.py
-==========================================
-Service 2 - Pattern Recognition and Trajectory Clustering (Ritikha)
-87 algorithms for animal GPS movement data.
-Features: speed_ms, altitude_m, turning_angle, straightness,
-          speed_roll_mean, speed_roll_std, step_length_m, alt_roll_mean
-"""
-
 import numpy as np
 import warnings
 warnings.filterwarnings("ignore")
@@ -15,9 +6,8 @@ from core.base import BaseAlgorithm
 from core.registry import registry
 
 
-# ---- helpers ---------------------------------------------------------------
 
-_K = 4  # default number of clusters
+_K = 4
 
 
 def _nc(y=None):
@@ -27,18 +17,6 @@ def _nc(y=None):
 
 
 def _nearest(centers, X, batch=5000):
-    """Assign each row of X to nearest center; return integer labels.
-
-    Was a single 3D broadcast (X[:,None,:] - centers[None,:,:], shape
-    (n, k, d)) over the WHOLE input at once. Fine for the small, fixed k
-    most callers here use (K-Means/DBSCAN/HDBSCAN), but OPTICSClustering's
-    fit_predict can produce many more clusters (dozens of small density
-    clusters), and at n~2.68M rows (true scale) x k~dozens that array is
-    multiple GB -> OOM (verified: 10+GB for k=60 at true scale). Batched
-    via cdist (argmin of euclidean distance == argmin of squared euclidean
-    distance, so results are byte-identical -- verified on randomized
-    trials), bounding peak memory regardless of n or k for every caller.
-    """
     from scipy.spatial.distance import cdist
     out = np.empty(len(X), dtype=int)
     for start in range(0, len(X), batch):
@@ -49,14 +27,12 @@ def _nearest(centers, X, batch=5000):
 
 
 def _discretize(X, col=0, n_bins=4):
-    """Quantile-bin one feature column into 0..n_bins-1."""
     s    = X[:, col].astype(float)
     cuts = np.percentile(s, np.linspace(0, 100, n_bins + 1)[1:-1])
     return np.digitize(s, cuts)
 
 
 def _cluster_centers(X, labels, k):
-    """Compute per-cluster means; fallback to global mean for empty clusters."""
     mu = X.mean(axis=0)
     return np.array([
         X[labels == j].mean(axis=0) if (labels == j).any() else mu
@@ -65,7 +41,6 @@ def _cluster_centers(X, labels, k):
 
 
 def _subsample(X, y, max_n=300, seed=42):
-    """Return a random subsample of at most max_n rows (keeps y aligned)."""
     if len(X) <= max_n:
         return X, y
     np.random.seed(seed)
@@ -79,9 +54,6 @@ def _safe_kmeans(X, k, seed=42):
     return km.fit(X)
 
 
-# ============================================================
-# CLUSTERING (24)
-# ============================================================
 
 @registry.register
 class KMeansMovementClustering(BaseAlgorithm):
@@ -512,10 +484,6 @@ class DTWKMeansClustering(BaseAlgorithm):
 
 
 
-# ============================================================
-# MOTIF DISCOVERY (15)
-# ============================================================
-
 @registry.register
 class MatrixProfileSTAMP(BaseAlgorithm):
     name        = "Matrix Profile STAMP"
@@ -846,10 +814,6 @@ class TurningPointDetectionClustering(BaseAlgorithm):
 
 
 
-# ============================================================
-# DIMENSIONALITY REDUCTION (14)
-# ============================================================
-
 @registry.register
 class PCATrajectoryCluster(BaseAlgorithm):
     name        = "PCA Trajectory Clustering"
@@ -1001,12 +965,7 @@ class TruncatedSVDCluster(BaseAlgorithm):
 
 
 
-# ============================================================
-# SEQUENTIAL PATTERN MINING (18)
-# ============================================================
-
 def _seq_fit(X, y, col=0, window=5):
-    """Common helper: discretise + find k cluster centers per dominant window pattern."""
     k      = _nc(y)
     sym    = _discretize(X, col=col, n_bins=k)
     wl     = min(window, len(X) // 4)
@@ -1093,12 +1052,7 @@ class PrefixSpanMining(BaseAlgorithm):
 
 
 
-# ============================================================
-# DEEP LEARNING — numpy/sklearn approximations (16)
-# ============================================================
-
 def _encode(X, hidden=8, seed=42):
-    """Simple 2-layer random projection as encoder approximation."""
     np.random.seed(seed)
     d   = X.shape[1]
     W1  = np.random.randn(d, hidden) * 0.1

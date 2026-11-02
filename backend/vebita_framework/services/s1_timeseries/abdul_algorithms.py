@@ -1,12 +1,3 @@
-"""
-services/s1_timeseries/abdul_algorithms.py
-==========================================
-Service 1 - Time Series Analysis (Abdul Rehman)
-83 algorithms for animal GPS movement data.
-Features: speed_ms, altitude_m, turning_angle, straightness,
-          speed_roll_mean, speed_roll_std, step_length_m, alt_roll_mean
-"""
-
 import numpy as np
 import warnings
 warnings.filterwarnings("ignore")
@@ -14,8 +5,6 @@ warnings.filterwarnings("ignore")
 from core.base import BaseAlgorithm
 from core.registry import registry
 
-
-# ---- helpers ---------------------------------------------------------------
 
 def _speed(X):
     return X[:, 0].astype(float)
@@ -28,19 +17,12 @@ def _ema(arr, alpha):
     return out
 
 def _subsample(X, y=None, max_n=20000, seed=42):
-    """Bound the sample count fed to algorithms whose fit cost grows
-    faster than linearly with n (matches the subsampling pattern used
-    elsewhere in this codebase, e.g. services/s3_environment)."""
     if len(X) <= max_n:
         return X, y
     rng = np.random.RandomState(seed)
     idx = rng.choice(len(X), max_n, replace=False)
     return X[idx], (y[idx] if y is not None else None)
 
-
-# ============================================================
-# STATISTICAL METHODS (22)
-# ============================================================
 
 @registry.register
 class WeightedMovingAverage(BaseAlgorithm):
@@ -107,10 +89,6 @@ class WeightedMovingAverage(BaseAlgorithm):
 
 
 
-
-# ============================================================
-# FORECASTING METHODS (18)
-# ============================================================
 
 @registry.register
 class ARIMAForecast(BaseAlgorithm):
@@ -336,12 +314,6 @@ class GradientBoostingForecast(BaseAlgorithm):
 
     def fit(self, X, y=None):
         from sklearn.ensemble import GradientBoostingRegressor
-        # sklearn's (non-histogram) GradientBoostingRegressor builds each
-        # of n_estimators=50 trees via exact sorted-feature splits -> far
-        # too slow to fit on the full ~10.7M-row training set (hangs at
-        # true scale). Subsample like the other super-linear-cost fits in
-        # this codebase; predict() stays on the full test set since tree
-        # traversal at predict time is cheap regardless of n.
         Xs, _ = _subsample(X, max_n=20000)
         self.model_    = GradientBoostingRegressor(
             n_estimators=50, max_depth=3, random_state=42
@@ -352,10 +324,6 @@ class GradientBoostingForecast(BaseAlgorithm):
     def predict(self, X):
         return self.model_.predict(X[:, 1:])
 
-
-# ============================================================
-# DECOMPOSITION (14)
-# ============================================================
 
 @registry.register
 class STLDecompose(BaseAlgorithm):
@@ -529,10 +497,6 @@ class PCAReconstruction(BaseAlgorithm):
 
 
 
-# ============================================================
-# SIGNAL PROCESSING (13)
-# ============================================================
-
 @registry.register
 class SavitzkyGolaySmooth(BaseAlgorithm):
     name        = "Savitzky-Golay Smooth"
@@ -676,10 +640,6 @@ class MFCCRegressionForecast(BaseAlgorithm):
             out[i] = self._frame_mfcc(seg) if len(seg) >= 2 else 0.0
         return out
 
-
-# ============================================================
-# DEEP LEARNING — numpy approximations (16)
-# ============================================================
 
 @registry.register
 class LSTMForecast(BaseAlgorithm):

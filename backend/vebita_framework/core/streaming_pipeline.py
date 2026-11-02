@@ -1,56 +1,3 @@
-"""
-core/streaming_pipeline.py
-===========================
-Memory-BOUNDED ("out-of-core") loading + feature extraction for Movebank
-CSVs too large to fit in RAM at once — a 15-20GB+ file should load in
-roughly the same peak memory as a 3GB one.
-
-Why this is needed (not just "read in chunks"):
--------------------------------------------------
-`data_pipeline.load_movebank_csv` already reads the CSV in chunks, but
-still concatenates every chunk into ONE full-size in-memory DataFrame and
-then sorts the whole thing by timestamp. `extract_features` then builds
-~8 more full-length derived columns on top of that. All of that is
-O(total rows) memory — it just moves the ceiling up a bit, it doesn't
-remove it. A file a few times bigger than the current largest ~3GB one
-will blow straight through it.
-
-The sort is the part that actually forces everything into memory at once,
-and it can't just be skipped: real Movebank exports are NOT reliably in
-timestamp order (verified directly on the real SW Germany stork file —
-sampling every 500,000th row, 12 of 27 samples were out of order, almost
-certainly because multiple individuals' fixes are interleaved), and every
-downstream feature here (bearing, turning angle, straightness, the
-rolling stats) depends on true chronological order per point.
-
-So this module does a real *external merge sort* (the classic
-bounded-memory algorithm for "sort a file bigger than RAM"):
-
-  1. RUN GENERATION — stream the CSV in chunks, sort each chunk (small,
-     bounded size) in memory, and spill each sorted chunk's columns to
-     disk as flat, memmap-friendly .npy files ("runs").
-  2. K-WAY MERGE — merge all the sorted runs into true global timestamp
-     order using only a small read-buffer per run at any time (not the
-     whole run, and never the whole dataset).
-  3. STREAMING FEATURE EXTRACTION — as globally-sorted rows come off the
-     merge, compute the *exact same* vectorised formulas as
-     `data_pipeline.extract_features`, but on small overlapping blocks
-     (carrying `window` rows of real context from one block to the next)
-     instead of the whole array, writing results directly into pre-sized
-     output files on disk (numpy memmap) instead of an in-RAM array.
-
-Peak memory throughout is bounded by chunk/buffer sizes, which are fixed
-constants — NOT by the number of rows in the file.
-
-The public entry point, `load_and_extract_features_streaming()`, returns
-memmap-backed numpy arrays with the identical shape/dtype/semantics as
-what `main.load_dataset_features()` used to build in memory: X
-(FEATURE_COLS, float32), y (int, or None), label_names (list[str]), lats,
-lons (float64). Every existing caller already only ever reads bounded
-slices out of these (thanks to the earlier `_subsample`/batching fixes
-across all 150 algorithms), so a memmap is a drop-in replacement — no
-algorithm code needs to change.
-"""
 
 import os
 import glob
@@ -68,19 +15,8 @@ R_EARTH = 6_371_000
 
 
 def _raise_open_file_limit():
-    """
-    The external merge sort keeps one open (memmapped) file handle per
-    sorted run per column (up to 6 columns: ts/lat/lon/speed/alt/beh).
-    At normal scale (a handful to a few dozen runs) this is a non-issue,
-    but a very large dataset can produce enough runs that the process's
-    default open-file limit becomes the real ceiling -- especially on
-    macOS, where a plain shell's default soft limit is often just 256.
-    Raise it, best-effort, so "biggest file possible" isn't quietly
-    capped by file descriptors rather than memory or disk. Safe to call
-    repeatedly; never raises on its own.
-    """
     if sys.platform == "win32":
-        return  # Windows manages file handles differently; no action needed
+        return
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         ceiling = hard if hard != resource.RLIM_INFINITY else 1_000_000
@@ -88,12 +24,9 @@ def _raise_open_file_limit():
         if soft < target:
             resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
     except Exception:
-        pass  # best-effort only -- fall back to whatever limit already applies
+        pass
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 1 — run generation: chunk, sort each chunk, spill to disk
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _make_run_dir(cache_dir):
     run_dir = os.path.join(cache_dir, "_runs")
@@ -104,13 +37,6 @@ def _make_run_dir(cache_dir):
 
 
 def _generate_sorted_runs(filepath, run_dir, chunk_rows, has_speed, has_alt, has_behavior, behavior_vocab):
-    """
-    Stream the CSV in chunks of `chunk_rows`, sort each chunk by timestamp
-    (bounded-size in-memory sort), and write each sorted chunk's columns
-    as separate flat .npy files under run_dir/run_<k>_<col>.npy.
-
-    Returns (n_runs, total_n).
-    """
     usecols = ["timestamp", "location-lat", "location-long"]
     if has_speed:
         usecols.append("ground-speed")
@@ -160,31 +86,12 @@ def _generate_sorted_runs(filepath, run_dir, chunk_rows, has_speed, has_alt, has
         n_runs += 1
         total_n += n
 
-        # Free this chunk's memory before reading the next one — pandas'
-        # own chunked reader already only holds one chunk at a time, but
-        # being explicit here costs nothing and removes any doubt.
         del chunk, ts_ns, lat, lon, order
 
     return n_runs, total_n
 
 
 def _collect_behavior_vocab(filepath, has_behavior):
-    """
-    Build the true_behavior -> integer code mapping ONCE, up front, the
-    same way sklearn's LabelEncoder does (codes assigned in sorted order
-    of the unique string values) — but from a single cheap single-column
-    pass instead of holding the whole dataset in memory to call
-    LabelEncoder on it directly. Missing/NaN values are bucketed under
-    the sentinel key "__nan__" so they still get a stable code rather
-    than crashing a downstream sort/compare on a real float NaN mixed
-    with strings.
-
-    Returns (vocab_dict, label_names) — label_names is already in the
-    same order as the assigned codes (label_names[code] == original
-    string), matching LabelEncoder.classes_ semantics. If the file has no
-    real (non-null) behavior values at all, returns ({}, []) so callers
-    can treat this exactly like "no true_behavior column".
-    """
     if not has_behavior:
         return {}, []
 
@@ -201,17 +108,8 @@ def _collect_behavior_vocab(filepath, has_behavior):
     return vocab, label_names
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 2 + 3 — k-way merge of the sorted runs, streamed straight into the
-# same windowed feature formulas as data_pipeline.extract_features
-# ─────────────────────────────────────────────────────────────────────────────
 
 class _RunReader:
-    """A small read-ahead buffer over one sorted run's on-disk columns.
-
-    Backed by memmap so refilling the buffer only pages in the slice
-    actually requested, not the whole run file.
-    """
 
     def __init__(self, run_dir, idx, has_speed, has_alt, has_behavior, buf_size):
         self.ts_mm = np.load(os.path.join(run_dir, f"run_{idx}_ts.npy"), mmap_mode="r")
@@ -227,7 +125,7 @@ class _RunReader:
             np.load(os.path.join(run_dir, f"run_{idx}_beh.npy"), mmap_mode="r") if has_behavior else None
         )
         self.n = len(self.ts_mm)
-        self.pos = 0          # how many rows of this run have been consumed so far
+        self.pos = 0
         self.buf_size = buf_size
         self.buf_ts = np.empty(0, dtype=np.int64)
         self.buf_lat = np.empty(0, dtype=np.float64)
@@ -240,7 +138,6 @@ class _RunReader:
         return self.pos >= self.n and len(self.buf_ts) == 0
 
     def ensure_buffer(self):
-        """Top the buffer back up from disk if it's run low and more data remains."""
         if len(self.buf_ts) > 0 or self.pos >= self.n:
             return
         end = min(self.pos + self.buf_size, self.n)
@@ -256,7 +153,6 @@ class _RunReader:
         self.pos = end
 
     def take(self, k):
-        """Remove and return the first k rows of the current buffer."""
         out_ts, self.buf_ts = self.buf_ts[:k], self.buf_ts[k:]
         out_lat, self.buf_lat = self.buf_lat[:k], self.buf_lat[k:]
         out_lon, self.buf_lon = self.buf_lon[:k], self.buf_lon[k:]
@@ -271,18 +167,6 @@ class _RunReader:
 
 
 def _kway_merge_blocks(run_dir, n_runs, has_speed, has_alt, has_behavior, buf_size):
-    """
-    Generator yielding successive globally-sorted blocks of
-    (ts_ns, lat, lon, speed_or_None, alt_or_None, beh_or_None) arrays,
-    merged from all sorted runs, using only `n_runs * buf_size` rows of
-    memory at any time — never the full dataset.
-
-    Correctness of the batching: at each step, threshold = the smallest
-    "last value currently buffered" across all runs that still have data.
-    Every row <= threshold, from ANY run, is safe to emit now, because no
-    run can still be hiding an unseen value smaller than its own current
-    buffer's last (largest-so-far) value — runs are internally sorted.
-    """
     readers = [_RunReader(run_dir, i, has_speed, has_alt, has_behavior, buf_size) for i in range(n_runs)]
 
     while True:
@@ -313,10 +197,6 @@ def _kway_merge_blocks(run_dir, n_runs, has_speed, has_alt, has_behavior, buf_si
 
 
 def _rechunk(gen, block_rows):
-    """Re-buffer a stream of variable-size merged blocks into fixed-size
-    `block_rows` blocks (except possibly the very last, shorter one), so
-    the windowed feature step below gets predictable, bounded-size input
-    regardless of how the k-way merge happened to batch things."""
     carry = None
     for ts, lat, lon, speed, alt, beh in gen:
         if carry is not None:
@@ -341,11 +221,6 @@ def _rechunk(gen, block_rows):
 
 
 def _compute_block_features(ts_ns, lat, lon, speed, alt, window):
-    """
-    The exact same formulas as data_pipeline.extract_features, applied to
-    one in-memory block (which may include `window` rows of real overlap
-    context on either side — see the caller for how those get trimmed).
-    """
     n = len(lat)
     times = np.floor(ts_ns.astype(np.float64) / 1e9)
 
@@ -392,13 +267,6 @@ def _compute_block_features(ts_ns, lat, lon, speed, alt, window):
         sp = speed.astype(np.float64)
         fallback = step_len.astype(np.float64) / np.where(time_delta > 0, time_delta, 1)
         sp = np.where(np.isnan(sp), fallback, sp)
-        # The position-based fallback can itself be NaN (e.g. a fix whose
-        # lat/lon were ALSO missing), matching the old pipeline's
-        # two-stage `.fillna(fallback).fillna(0)` -- zero-fill anything
-        # still NaN here, BEFORE it feeds the rolling mean/std below, so
-        # those rolling windows see the same values old pipeline did
-        # rather than silently skipping NaN entries (which changes the
-        # computed average, not just leaves a placeholder).
         speed_ms = np.nan_to_num(sp, nan=0.0).astype(np.float32)
     else:
         speed_ms = (step_len.astype(np.float64) / np.where(time_delta > 0, time_delta, 1)).astype(np.float32)
@@ -412,47 +280,18 @@ def _compute_block_features(ts_ns, lat, lon, speed, alt, window):
     speed_roll_std = pd.Series(speed_ms).rolling(window, center=True, min_periods=1).std().fillna(0).astype(np.float32).values
     alt_roll_mean = pd.Series(altitude_m).rolling(window, center=True, min_periods=1).mean().astype(np.float32).values
 
-    # Column order must match FEATURE_COLS in data_pipeline.py exactly.
     X_block = np.stack(
         [speed_ms, altitude_m, turning, straight,
          speed_roll_mean, speed_roll_std, step_len, alt_roll_mean],
         axis=1,
     ).astype(np.float32)
 
-    # The old in-memory pipeline's final step was
-    # `feat_df[FEATURE_COLS].fillna(0).values` -- a blanket NaN->0 fill
-    # across the whole feature matrix, catching cases the per-column
-    # handling above doesn't (e.g. a raw GPS fix with a missing/NaN
-    # lat or lon propagating NaN through step length, bearing, turning
-    # angle, straightness, and the rolling stats derived from them).
-    # Replicate that exactly here so every algorithm downstream sees the
-    # same "no NaNs in X, ever" guarantee it always has.
     np.nan_to_num(X_block, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
     return X_block
 
 
 def _extract_features_streaming(merged_block_gen, total_n, window,
                                   X_mm, lat_mm, lon_mm, beh_mm, has_behavior):
-    """
-    Consume globally-sorted blocks ONE AT A TIME (plus a single one-block
-    lookahead peek, never the whole generator) and write windowed
-    features straight into the pre-sized output memmaps.
-
-    Each block's OWN rows are finalised using: the real trailing `window`
-    rows of the block before it (for correct lookback — omitted only for
-    the true first block, which needs the natural zero-padded start
-    anyway), and a `window`-row peek borrowed from the head of the NEXT
-    block (for correct lookahead — omitted only for the true last block).
-    Peak memory is at most ~2 blocks + two small `window`-row slices at
-    any time, regardless of total dataset size.
-
-    (An earlier version of this function tried to carry the trailing
-    overlap of block i FORWARD as leading-context for block i+1 without
-    ever finalising it there or in block i — silently dropping `window`
-    real rows at every block boundary. Peeking one block ahead instead of
-    carrying one behind is what actually gives every row both a real
-    predecessor and a real successor window.)
-    """
     overlap = window
 
     def _cat_list(parts):
@@ -524,9 +363,6 @@ def _extract_features_streaming(merged_block_gen, total_n, window,
     assert global_pos == total_n, f"streaming pipeline lost/gained rows: wrote {global_pos}, expected {total_n}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Public entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
 def load_and_extract_features_streaming(
     filepath,
@@ -536,17 +372,6 @@ def load_and_extract_features_streaming(
     merge_buf_rows=200_000,
     block_rows=200_000,
 ):
-    """
-    Out-of-core replacement for
-    `extract_features(load_movebank_csv(filepath))` + the X/y/lats/lons
-    assembly `main.load_dataset_features` used to do in RAM.
-
-    Returns memmap-backed (X, y_or_None, label_names, lats, lons) with the
-    same dtypes/shapes/semantics the old in-memory version produced.
-    Everything under `cache_dir` is scratch space owned by this call —
-    callers are responsible for cleaning up the PREVIOUS dataset's
-    cache_dir when they load a new one (see main.py's cache wrapper).
-    """
     _raise_open_file_limit()
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -589,13 +414,8 @@ def load_and_extract_features_streaming(
     if beh_mm is not None:
         beh_mm.flush()
 
-    # Sorted runs are fully consumed at this point — free the disk space
-    # immediately rather than leaving 1x the raw-column size lying around
-    # for the lifetime of the cache entry.
     shutil.rmtree(run_dir, ignore_errors=True)
 
-    # Re-open read-only memmaps to hand back (the w+ handles above stay
-    # writable, which we don't want callers doing by accident).
     X_ro = np.memmap(X_path, dtype=np.float32, mode="r", shape=(total_n, len(FEATURE_COLS)))
     lat_ro = np.memmap(lat_path, dtype=np.float64, mode="r", shape=(total_n,))
     lon_ro = np.memmap(lon_path, dtype=np.float64, mode="r", shape=(total_n,))

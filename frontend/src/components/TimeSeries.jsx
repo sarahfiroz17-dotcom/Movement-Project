@@ -147,7 +147,7 @@ export default function TimeSeries({ results }) {
   const nameB = results.algo_b?.name?.replace(/^(Beh|Env)\s/, '') || 'B'
   const compareMode = results?.compareMode
 
-  // Auto-generated insight for time series tab
+  
   const tsInsightLines = []
   if (speedData.length > 0) {
     const meanSpeed = speedData.reduce((s, v) => s + v, 0) / speedData.length
@@ -191,7 +191,7 @@ export default function TimeSeries({ results }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-      {/* Auto-generated insight at top */}
+      
       {tsInsightLines.length > 0 && (
         <div className="panel" style={{ borderLeft: '3px solid var(--accent)', background: 'var(--surface1)' }}>
           <div className="panel-title" style={{ marginBottom: 6 }}>What the analysis shows</div>

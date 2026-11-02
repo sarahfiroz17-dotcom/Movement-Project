@@ -1,14 +1,6 @@
-"""
-main.py  —  Vebita FastAPI Backend
-===================================
-Run with:  uvicorn main:app --reload --port 8000
-Docs at:   http://localhost:8000/docs
-"""
-
 import sys, os, time, json, uuid, math, shutil
 from functools import lru_cache
 
-# Make vebita_framework importable
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "vebita_framework"))
 
@@ -25,19 +17,14 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import LabelEncoder
 
-# ── Database ──────────────────────────────────────────────────────────────────
 from database import init_db, get_db
 
-# ── Algorithm framework ───────────────────────────────────────────────────────
 from vebita_framework.core.registry import registry
 from vebita_framework.core.data_pipeline import (
     load_movebank_csv, extract_features, FEATURE_COLS, generate_animal_track
 )
 from vebita_framework.core.streaming_pipeline import load_and_extract_features_streaming
 
-# ── Import all service algorithm files ────────────────────────────────────────
-# Add each team member's file here as they complete it.
-# The registry auto-discovers everything — no other changes needed.
 try:
     from vebita_framework.services.example_algorithms import *
 except Exception as e:
@@ -86,7 +73,6 @@ try:
 except Exception as e:
     print(f"⚠ Service 5 failed to load: {e}")
 
-# ── Service metadata ──────────────────────────────────────────────────────────
 SERVICES = {
     1: {"name": "Time Series Patterns",        "color": "#378ADD"},
     2: {"name": "Movement Patterns",            "color": "#ED93B1"},
@@ -96,7 +82,6 @@ SERVICES = {
     6: {"name": "Behavioural Classification",   "color": "#EF9F27"},
 }
 
-# ── App setup ─────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Vebita API",
     description="Animal movement analysis platform — VEBITA group project",
@@ -116,12 +101,7 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
 def compute_metrics(y_true, y_pred, label_names):
-    """Return dict of per-class and overall metrics."""
     if y_true is None or len(np.unique(y_true)) < 2:
         return {"f1": None, "accuracy": None,
                 "precision": None, "recall": None, "per_class_f1": {}}
@@ -147,10 +127,6 @@ def compute_metrics(y_true, y_pred, label_names):
 
 
 def _json_safe(obj):
-    """Recursively replace NaN/Infinity with None so FastAPI's strict JSON
-    encoder (allow_nan=False) never chokes on a real-world dataset that has
-    missing GPS fixes, gaps, or other holes that surface as float('nan')
-    or float('inf') anywhere in a response payload."""
     if isinstance(obj, float):
         return None if (math.isnan(obj) or math.isinf(obj)) else obj
     if isinstance(obj, dict):
@@ -160,20 +136,7 @@ def _json_safe(obj):
     return obj
 
 
-# Feature-cache lives on DISK now, not in a Python-level LRU cache in RAM
-# (a "cached" DataFrame for a 15-20GB+ dataset is itself 15-20GB+ of RAM
-# just to hold the cache; the streaming pipeline below only ever needs a
-# small, constant amount of RAM to BUILD its output, but the output
-# itself — the X/y/lats/lons the algorithms run against — still has to
-# live somewhere while the app uses it. Putting it in memmap-backed .dat
-# files under FEATURE_CACHE_DIR means the OS page-cache, not the Python
-# process, is what actually holds it in RAM, and the OS is free to page
-# it in/out under memory pressure instead of the process getting OOM
-# killed).
 FEATURE_CACHE_DIR = os.path.join(os.path.dirname(__file__), "feature_cache")
-# Wipe any stale cache from a previous run on every fresh server start —
-# the in-memory "which dataset is cached" bookkeeping below also resets
-# on restart, so an orphaned on-disk cache would just be dead weight.
 shutil.rmtree(FEATURE_CACHE_DIR, ignore_errors=True)
 os.makedirs(FEATURE_CACHE_DIR, exist_ok=True)
 
@@ -181,28 +144,10 @@ _loaded_dataset = {"filename": None, "result": None}
 
 
 def _cache_slug(filename: str) -> str:
-    """Filesystem-safe subdirectory name for one dataset's on-disk cache."""
     return "".join(c if (c.isalnum() or c in "._-") else "_" for c in filename)
 
 
 def load_dataset_features(filename: str):
-    """Load CSV, extract features, return (X, y, label_names, lats, lons).
-
-    Out-of-core: uses `load_and_extract_features_streaming`, which reads
-    the CSV in bounded chunks, sorts it with an external (disk-based)
-    merge sort, and extracts windowed features one small block at a
-    time — never holding the whole dataset in RAM at once, regardless of
-    how large the file is. Returned arrays are memmaps backed by files
-    under FEATURE_CACHE_DIR, opened read-only.
-
-    Only the most-recently-used dataset is kept (in memory bookkeeping
-    AND on disk): every /run call used to re-read and re-process the
-    ENTIRE CSV from scratch, even though most of a session is spent
-    comparing many different algorithm pairs against the SAME
-    already-uploaded dataset. Switching to a different dataset deletes
-    the previous one's on-disk cache directory so repeated
-    uploads/switches don't pile up unbounded disk usage over a session.
-    """
     if _loaded_dataset["filename"] == filename and _loaded_dataset["result"] is not None:
         return _loaded_dataset["result"]
 
@@ -215,12 +160,6 @@ def load_dataset_features(filename: str):
 
     X, y, label_names, lats, lons = load_and_extract_features_streaming(path, cache_dir)
 
-    # Belt-and-suspenders: the streaming pipeline already hands back
-    # read-only memmaps, but explicitly marking them read-only here keeps
-    # the same safety guarantee the old in-memory cache made — if any
-    # algorithm's fit()/predict() ever mutated its input in place, it
-    # raises a clear, per-algorithm error instead of silently corrupting
-    # this shared cached data for every later run against this dataset.
     X.setflags(write=False)
     lats.setflags(write=False)
     lons.setflags(write=False)
@@ -232,10 +171,6 @@ def load_dataset_features(filename: str):
     _loaded_dataset["result"] = result
     return result
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ROUTES — HEALTH
-# ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -252,22 +187,14 @@ def health():
     return {"status": "ok"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ROUTES — DATASETS
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.post("/upload")
 async def upload_dataset(file: UploadFile = File(...)):
-    """Upload a Movebank CSV file."""
     if not file.filename.endswith(".csv"):
         raise HTTPException(400, "Only CSV files are supported")
 
     safe_name = f"{uuid.uuid4().hex}_{file.filename}"
     path = os.path.join(UPLOAD_DIR, safe_name)
 
-    # Stream the upload straight to disk instead of `await file.read()`
-    # (which buffers the entire file in memory first) - on a multi-GB file
-    # that alone was enough to exhaust memory before parsing even started.
     CHUNK = 1024 * 1024
     with open(path, "wb") as out:
         while True:
@@ -276,14 +203,10 @@ async def upload_dataset(file: UploadFile = File(...)):
                 break
             out.write(chunk)
 
-    # Parse for metadata. Row count and species only need the header plus
-    # a cheap line count - pd.read_csv(path) with no usecols/chunksize
-    # re-parses every column of the whole file (the same cost problem
-    # load_movebank_csv had) just to answer two small questions.
     try:
         with open(path, "rb") as fh:
             header_line = fh.readline().decode("utf-8", errors="ignore")
-            n_fixes = sum(1 for _ in fh)  # remaining lines = data rows (header already consumed)
+            n_fixes = sum(1 for _ in fh)
 
         header_cols = [c.strip().strip('"') for c in header_line.strip().split(",")]
         species = "Unknown"
@@ -318,7 +241,6 @@ async def upload_dataset(file: UploadFile = File(...)):
 
 @app.get("/datasets")
 def list_datasets():
-    """Return all uploaded datasets."""
     db = get_db()
     rows = db.execute(
         "SELECT * FROM datasets ORDER BY uploaded_at DESC"
@@ -329,7 +251,6 @@ def list_datasets():
 
 @app.delete("/datasets/{dataset_id}")
 def delete_dataset(dataset_id: int):
-    """Delete a dataset record (file stays on disk)."""
     db = get_db()
     db.execute("DELETE FROM datasets WHERE id=?", (dataset_id,))
     db.commit()
@@ -337,13 +258,8 @@ def delete_dataset(dataset_id: int):
     return {"deleted": dataset_id}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ROUTES — ALGORITHMS
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.get("/algorithms/{service_id}")
 def list_algorithms(service_id: int):
-    """Return all algorithms registered for a given service."""
     algos = registry.get_by_service(service_id)
     if not algos:
         return []
@@ -361,17 +277,12 @@ def list_algorithms(service_id: int):
 
 @app.get("/algorithms")
 def list_all_algorithms():
-    """Return all algorithms across all services."""
     out = {}
     for sid in range(1, 7):
         algos = registry.get_by_service(sid)
         out[sid] = [{"name": a.name, "category": a.category} for a in algos]
     return out
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ROUTES — RUN ANALYSIS
-# ─────────────────────────────────────────────────────────────────────────────
 
 class RunRequest(BaseModel):
     dataset_id: int
@@ -382,11 +293,6 @@ class RunRequest(BaseModel):
 
 @app.post("/run")
 def run_comparison(req: RunRequest):
-    """
-    Run two algorithms on a dataset and return full comparison results.
-    This is the core endpoint — called when user clicks 'Run analysis'.
-    """
-    # Load dataset record
     db = get_db()
     row = db.execute(
         "SELECT * FROM datasets WHERE id=?", (req.dataset_id,)
@@ -398,7 +304,6 @@ def run_comparison(req: RunRequest):
 
     service_name = SERVICES.get(req.service_id, {}).get("name", "Unknown")
 
-    # For S3 and S6, pass current species to algorithm modules for species-aware behaviour
     if req.service_id in (3, 6):
         dataset_species = dict(row).get("species", "unknown") or "unknown"
         set_current_species(dataset_species)
@@ -409,10 +314,6 @@ def run_comparison(req: RunRequest):
     except Exception as e:
         raise HTTPException(500, f"Failed to load dataset: {e}")
 
-    # Train/test split:
-    # S3 regression: temporal (last 20%) to preserve temporal autocorrelation of env scores.
-    # S6 classification: stratified random split so all behaviour classes are represented
-    # in training, regardless of when they occur in the track.
     if req.service_id == 6:
         from sklearn.model_selection import train_test_split as _tts
         n = len(X)
@@ -435,20 +336,12 @@ def run_comparison(req: RunRequest):
         lats_test = lats[split:].tolist() if lats is not None and len(lats) else []
         lons_test = lons[split:].tolist() if lons is not None and len(lons) else []
 
-    # Auto-assign movement labels when dataset has no true_behavior column.
-    # Uses KMeans on speed + altitude + turning angle so boundaries are
-    # non-linear — algorithms with different decision boundaries will genuinely
-    # disagree rather than all converging on the same speed-rank split.
     effective_label_names = label_names
     if not label_names:
         from sklearn.mixture import GaussianMixture
         from sklearn.preprocessing import StandardScaler
 
         def _cluster_labels(X_split):
-            # GMM is more appropriate than KMeans for behavioural states:
-            # - allows unequal cluster sizes (resting is frequent, migration is rare)
-            # - allows non-spherical clusters (behavioural states are not
-            #   geometrically equal in feature space)
             n_cols = X_split.shape[1]
             feat_idx = [i for i in [0, 1, 2] if i < n_cols]
             feats = X_split[:, feat_idx].astype(float)
@@ -460,8 +353,6 @@ def run_comparison(req: RunRequest):
                 random_state=42, max_iter=200, n_init=3,
             )
             raw = gmm.fit_predict(feats_s)
-            # Re-order components by mean speed so labels are ecologically interpretable:
-            # slowest cluster = Resting, fastest = Migrating
             means = np.array([feats_s[raw == k, 0].mean() if (raw == k).any() else 0
                               for k in range(4)])
             order = np.argsort(means)
@@ -472,7 +363,6 @@ def run_comparison(req: RunRequest):
         y_test  = _cluster_labels(X_test)
         effective_label_names = ["Resting", "Foraging", "Traveling", "Migrating"]
 
-    # Find algorithm classes
     all_algos = registry.get_by_service(req.service_id)
     algo_map  = {a.name: a for a in all_algos}
     algo_cat_map = {a.name: getattr(a, "category", "") for a in all_algos}
@@ -491,7 +381,6 @@ def run_comparison(req: RunRequest):
             rt   = round(time.time() - t0, 3)
             cat  = algo_cat_map.get(name, "")
 
-            # S3 (Environmental Factors) returns continuous scores — send as-is
             if req.service_id == 3:
                 raw_finite = np.nan_to_num(raw.astype(float), nan=0.0, posinf=0.0, neginf=0.0)
                 r_min, r_max = float(raw_finite.min()), float(raw_finite.max())
@@ -511,7 +400,6 @@ def run_comparison(req: RunRequest):
                     "runtime": rt, "error": None,
                 }
 
-            # Clamp predictions to valid integer labels
             preds = np.clip(np.round(raw).astype(int), 0, 99).tolist()
 
             metrics = compute_metrics(y_test, preds, effective_label_names)
@@ -545,7 +433,6 @@ def run_comparison(req: RunRequest):
     result_a = run_one(req.algo_a)
     result_b = run_one(req.algo_b)
 
-    # Permutation importance — classification and regression, capped at 2000 rows for speed
     from sklearn.inspection import permutation_importance as _perm_imp
     from sklearn.metrics import accuracy_score, r2_score
 
@@ -568,7 +455,6 @@ def run_comparison(req: RunRequest):
             print(f"[importance] {inst.__class__.__name__} failed: {e}")
             return {}
 
-    # Re-instantiate fitted models to run importance (run_one already called fit internally)
     def _fitted_inst(name):
         try:
             inst = algo_map[name]()
@@ -581,7 +467,6 @@ def run_comparison(req: RunRequest):
             return None
 
     if y_test is not None:
-        # For S3 use env_score as the importance target
         if req.service_id == 3 and _env_features is not None:
             from vebita_framework.services.s3_environment.sarah_algorithms import _env_score
             y_imp_s3 = _env_score(X_test)
@@ -598,7 +483,6 @@ def run_comparison(req: RunRequest):
         result_a["feature_importances"] = {}
         result_b["feature_importances"] = {}
 
-    # Save to DB
     db = get_db()
     db.execute("""
         INSERT INTO results (
@@ -633,9 +517,6 @@ def run_comparison(req: RunRequest):
     result_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
     db.close()
 
-    # Visualisation uses the FULL track so both S3 and S6 show the complete
-    # animal journey on the map. Predictions/scores are placed at their correct
-    # position in the full track; fixes that were in the training set get None.
     MAX_VIS = 20_000
 
     lats_full = np.array(lats, dtype=float)
@@ -650,18 +531,12 @@ def run_comparison(req: RunRequest):
     lats_vis = lats_full[valid_idx_full].tolist()
     lons_vis = lons_full[valid_idx_full].tolist()
 
-    # Build lookup: original row index → position in test arrays
-    # S3 (temporal split): test rows are indices split..n
-    # S6 (stratified split): test rows are scattered via test_idx
     n_total = len(X)
     if req.service_id == 6:
-        # test_idx is a numpy array of original positions
-        test_pos_map = {int(orig): pos for pos, orig in enumerate(test_idx)}
     else:
         split_pos = int(n_total * 0.8)
         test_pos_map = {orig: orig - split_pos for orig in range(split_pos, n_total)}
 
-    # Full-track feature array for time-series charts (sampled from full X)
     X_full_arr = np.array(X)
     def _feat_col_full(col):
         if X_full_arr.shape[1] > col:
@@ -675,14 +550,12 @@ def run_comparison(req: RunRequest):
     steps_vis        = _feat_col_full(6)
 
     def _map_to_full(test_list, default=None):
-        """Place test-set values at their original full-track positions."""
         if not test_list:
             return [default] * len(valid_idx_full)
         out = []
         for orig_i in valid_idx_full:
             pos = test_pos_map.get(int(orig_i))
             val = test_list[pos] if pos is not None and pos < len(test_list) else default
-            # Convert numpy scalars to plain Python types so FastAPI can serialise them
             if val is not None:
                 val = int(val) if isinstance(val, (np.integer,)) else float(val) if isinstance(val, (np.floating,)) else val
             out.append(val)
@@ -699,7 +572,6 @@ def run_comparison(req: RunRequest):
     result_a_vis = _sample_algo(result_a)
     result_b_vis = _sample_algo(result_b)
 
-    # S3: compute per-fix env sub-factors and movement stages
     X_test_arr = np.array(X_test)
     env_factors_vis = None
     stages_vis = None
@@ -745,13 +617,8 @@ def run_comparison(req: RunRequest):
     })
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ROUTES — HISTORY
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.get("/history")
 def get_history(limit: int = 50):
-    """Return past analysis runs with dataset info joined."""
     db = get_db()
     rows = db.execute("""
         SELECT r.id, r.service_name, r.algo_a, r.algo_b,
@@ -771,7 +638,6 @@ def get_history(limit: int = 50):
 
 @app.get("/history/{result_id}")
 def get_result(result_id: int):
-    """Return a single result with full predictions."""
     db = get_db()
     row = db.execute("SELECT * FROM results WHERE id=?", (result_id,)).fetchone()
     db.close()
@@ -788,16 +654,8 @@ def get_result(result_id: int):
     return r
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ROUTES — DEMO DATA (no upload needed)
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.post("/demo")
 def run_demo(payload: dict = None):
-    """
-    Generate a synthetic Movebank track and run two algorithms on it.
-    Useful for testing the website without a real CSV.
-    """
     payload = payload or {}
     animal   = payload.get("animal", "red_kite")
     algo_a   = payload.get("algo_a", "Beh Random Forest Classifier")
@@ -805,7 +663,6 @@ def run_demo(payload: dict = None):
     service  = payload.get("service_id", 6)
     n_points = payload.get("n_points", 800)
 
-    # Use a random seed each call so different algo pairs get varied demo data
     seed = int(time.time() * 1000) % 100000
     raw_df   = generate_animal_track(animal, n_points, seed=seed)
     feat_df  = extract_features(raw_df)
@@ -838,7 +695,6 @@ def run_demo(payload: dict = None):
             preds = np.clip(np.round(inst.predict(X_test)).astype(int), 0, 99).tolist()
             rt    = round(time.time() - t0, 3)
             m     = compute_metrics(y_test, preds, label_names)
-            # Permutation importance capped at 2000 rows
             from sklearn.inspection import permutation_importance as _perm_imp
             try:
                 X_imp, y_imp = X_test[:2000], y_test[:2000]

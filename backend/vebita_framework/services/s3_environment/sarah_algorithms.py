@@ -1,18 +1,3 @@
-"""
-services/s3_environment/sarah_algorithms.py
-============================================
-VEBITA — Service 3: Environmental Factors (Sarah)
-
-25 algorithms across 7 categories studying how environmental variables
-(temperature, NDVI, terrain, weather, land cover, etc.) relate to and
-influence animal movement from Movebank data.
-
-Feature matrix X shape: (n_points, 8)
-    speed_ms, altitude_m, turning_angle, straightness,
-    speed_roll_mean, speed_roll_std, step_length_m, alt_roll_mean
-
-Service ID: 3
-"""
 
 import numpy as np
 from sklearn.linear_model import (
@@ -58,14 +43,12 @@ except ImportError:
 from core.base import BaseAlgorithm
 from core.registry import registry
 
-# Ordered names for the 12 columns returned by _env_features()
 ENV_FACTOR_NAMES = [
     "terrain_ruggedness", "slope", "ndvi_proxy", "land_cover",
     "wind_proxy", "temperature_proxy", "proximity_water", "solar_radiation",
     "resource_score", "elevation_gradient", "habitat_boundary", "energy_expenditure",
 ]
 
-# Set by main.py before running S3 algorithms so species-aware weights apply
 _CURRENT_SPECIES = "unknown"
 
 
@@ -78,10 +61,6 @@ def get_current_species() -> str:
     return _CURRENT_SPECIES
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# HELPER: synthetic environmental features derived from movement data
-# In real Movebank use, these would come from raster layers (GEE, ERA5, SRTM).
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def _subsample_env(X, y=None, max_n=2000, seed=42):
     if len(X) <= max_n:
@@ -92,24 +71,9 @@ def _subsample_env(X, y=None, max_n=2000, seed=42):
 
 
 def _env_score(X: np.ndarray, species: str = None) -> np.ndarray:
-    """
-    Composite environmental intensity score built from all 12 proxy features.
-
-    Weights are derived from the absolute Pearson correlation of each feature
-    with energy expenditure (speed²) — the most ecologically grounded movement
-    cost signal available without external data. This means the score reflects
-    how strongly each factor co-varies with locomotion cost, which is a
-    defensible proxy for environmental influence on movement.
-
-    Species group adjusts the base weights to reflect known ecology:
-    - Birds weight altitude/terrain more (thermal soaring, migration altitude)
-    - Mammals weight terrain/water more (landscape navigation)
-    - Insects weight NDVI/resource more (foraging patch quality)
-    """
     E = _env_features(X)
-    energy = E[:, 11]  # energy expenditure = speed² — our anchor signal
+    energy = E[:, 11]
 
-    # Compute absolute correlation of each of the 12 features with energy
     corrs = np.zeros(12)
     for i in range(12):
         col = E[:, i]
@@ -120,13 +84,11 @@ def _env_score(X: np.ndarray, species: str = None) -> np.ndarray:
         else:
             corrs[i] = 0.0
 
-    # Species-group multipliers — scale base correlations by ecological priority
     sp = species if species is not None else _CURRENT_SPECIES
     group = _species_group(sp)
     multipliers = _species_multipliers(group)
     adjusted = corrs * multipliers
 
-    # Normalise to sum to 1 so result stays in interpretable range
     total = adjusted.sum()
     weights = adjusted / total if total > 1e-9 else np.ones(12) / 12
 
@@ -139,7 +101,6 @@ def _env_score(X: np.ndarray, species: str = None) -> np.ndarray:
 
 
 def _species_group(species: str) -> str:
-    """Classify a species name string into a broad ecological group."""
     s = species.lower()
     birds = ["stork", "kite", "cuckoo", "guillemot", "swan", "eagle",
              "hawk", "falcon", "heron", "crane", "goose", "duck",
@@ -158,45 +119,22 @@ def _species_group(species: str) -> str:
 
 
 def _species_multipliers(group: str) -> np.ndarray:
-    """
-    Per-factor weight multipliers by species group.
-    Indices match ENV_FACTOR_NAMES:
-    0=terrain_rug, 1=slope, 2=ndvi, 3=land_cover,
-    4=wind, 5=temp, 6=water, 7=solar,
-    8=resource, 9=elev_grad, 10=hab_boundary, 11=energy
-    """
     if group == "bird":
-        # Birds: terrain and altitude-related factors dominate (thermal soaring,
-        # migration corridors, altitude-dependent temperature)
         return np.array([1.4, 1.3, 1.0, 0.8,
                          1.2, 1.3, 0.8, 1.1,
                          0.9, 1.3, 1.0, 1.2])
     if group == "mammal":
-        # Mammals: terrain navigation and water proximity dominate
         return np.array([1.3, 1.2, 1.0, 1.1,
                          0.9, 1.0, 1.4, 0.8,
                          1.1, 1.2, 1.1, 1.2])
     if group == "insect":
-        # Insects: vegetation quality and resource patches dominate
         return np.array([0.8, 0.7, 1.5, 1.2,
                          0.7, 0.9, 1.2, 1.3,
                          1.5, 0.7, 1.1, 1.0])
-    # Unknown: equal multipliers — pure correlation-based weights
     return np.ones(12)
 
 
 def _env_features(X: np.ndarray) -> np.ndarray:
-    """
-    Derive 12 synthetic environmental proxy features from movement features.
-    Columns: terrain_ruggedness, slope, ndvi_proxy, land_cover,
-             wind_proxy, temperature_proxy, proximity_water, solar_radiation,
-             resource_score, elevation_gradient, habitat_boundary, energy_expenditure
-
-    Terrain ruggedness uses a rolling absolute difference (window=3) rather than
-    np.gradient to avoid the boundary artifact where the gradient at the first/last
-    point of a train or test split is influenced by the split cutoff rather than
-    the actual terrain. Rolling diff only looks at adjacent points.
-    """
     speed    = X[:, 0]
     alt      = X[:, 1]
     turn     = X[:, 2]
@@ -206,12 +144,11 @@ def _env_features(X: np.ndarray) -> np.ndarray:
     step     = X[:, 6]
     alt_mean = X[:, 7]
 
-    # Rolling absolute altitude difference — boundary-safe terrain ruggedness
     alt_f = alt.astype(float)
     alt_diff = np.zeros(len(alt_f))
     if len(alt_f) > 1:
         alt_diff[1:] = np.abs(np.diff(alt_f))
-        alt_diff[0]  = alt_diff[1]  # repeat first interior value, not boundary artifact
+        alt_diff[0]  = alt_diff[1]
 
     terrain_rug  = alt_diff
     slope        = np.gradient(alt_mean)
@@ -233,13 +170,9 @@ def _env_features(X: np.ndarray) -> np.ndarray:
     ])
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CATEGORY 1 — STATISTICAL & REGRESSION  (3 algorithms)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class EnvBayesianRidge(BaseAlgorithm):
-    """Bayesian Ridge regression with automatic regularisation."""
     name        = "Env Bayesian Ridge"
     service_id  = 3
     category    = "statistical"
@@ -263,7 +196,6 @@ class EnvBayesianRidge(BaseAlgorithm):
 
 @registry.register
 class EnvPLSRegression(BaseAlgorithm):
-    """Partial Least Squares: links environmental & movement latent factors."""
     name        = "Env PLS Regression"
     service_id  = 3
     category    = "statistical"
@@ -287,7 +219,6 @@ class EnvPLSRegression(BaseAlgorithm):
 
 @registry.register
 class EnvQuantileRegression(BaseAlgorithm):
-    """Quantile regression — models median environmental response robustly."""
     name        = "Env Quantile Regression"
     service_id  = 3
     category    = "statistical"
@@ -309,13 +240,9 @@ class EnvQuantileRegression(BaseAlgorithm):
         return self.model.predict(_env_features(X)).astype(float)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CATEGORY 2 — TIME SERIES & TEMPORAL  (3 algorithms)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class EnvKalmanFilter(BaseAlgorithm):
-    """Kalman filter — optimal state estimation of environmental trajectory."""
     name        = "Env Kalman Filter"
     service_id  = 3
     category    = "time_series"
@@ -355,7 +282,6 @@ class EnvKalmanFilter(BaseAlgorithm):
 
 @registry.register
 class EnvFourierTransform(BaseAlgorithm):
-    """Fourier transform: frequency content of environmental influence."""
     name        = "Env Fourier Transform"
     service_id  = 3
     category    = "time_series"
@@ -393,7 +319,6 @@ class EnvFourierTransform(BaseAlgorithm):
 
 @registry.register
 class EnvSeasonalDecomposition(BaseAlgorithm):
-    """Seasonal decomposition: extract daily/periodic environmental signal."""
     name        = "Env Seasonal Decomposition"
     service_id  = 3
     category    = "time_series"
@@ -422,13 +347,9 @@ class EnvSeasonalDecomposition(BaseAlgorithm):
         return seasonal.astype(float)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CATEGORY 3 — ML SUPERVISED  (3 algorithms)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class EnvRandomForestRegressor(BaseAlgorithm):
-    """Random Forest regression: nonlinear env-movement relationship."""
     name        = "Env Random Forest Regressor"
     service_id  = 3
     category    = "ml_supervised"
@@ -452,7 +373,6 @@ class EnvRandomForestRegressor(BaseAlgorithm):
 
 @registry.register
 class EnvGradientBoostingRegressor(BaseAlgorithm):
-    """GBM regression for complex environmental response surfaces."""
     name        = "Env Gradient Boosting Regressor"
     service_id  = 3
     category    = "ml_supervised"
@@ -476,7 +396,6 @@ class EnvGradientBoostingRegressor(BaseAlgorithm):
 
 @registry.register
 class EnvXGBoostRegressor(BaseAlgorithm):
-    """XGBoost for high-accuracy environmental factor modelling."""
     name        = "Env XGBoost Regressor"
     service_id  = 3
     category    = "ml_supervised"
@@ -506,13 +425,9 @@ class EnvXGBoostRegressor(BaseAlgorithm):
         return self.model.predict(_env_features(X)).astype(float)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CATEGORY 4 — DEEP LEARNING  (3 algorithms)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class EnvMLPRegressor(BaseAlgorithm):
-    """Multi-layer perceptron regression on environmental features."""
     name        = "Env MLP Regressor"
     service_id  = 3
     category    = "deep_learning"
@@ -541,7 +456,6 @@ class EnvMLPRegressor(BaseAlgorithm):
 
 @registry.register
 class EnvGaussianProcessRegressor(BaseAlgorithm):
-    """Gaussian Process Regression — probabilistic environmental surface."""
     name        = "Env Gaussian Process Regressor"
     service_id  = 3
     category    = "deep_learning"
@@ -558,7 +472,6 @@ class EnvGaussianProcessRegressor(BaseAlgorithm):
         )
 
     def fit(self, X, y=None):
-        # GPR training cost is O(n^3); keep sample small
         Xs, _ = _subsample_env(X, None, max_n=500)
         self.model.fit(_env_features(Xs), _env_score(Xs))
         self.is_fitted = True
@@ -570,7 +483,6 @@ class EnvGaussianProcessRegressor(BaseAlgorithm):
 
 @registry.register
 class EnvAutoencoderScore(BaseAlgorithm):
-    """Autoencoder proxy: PCA reconstruction error as environmental stress."""
     name        = "Env Autoencoder Score"
     service_id  = 3
     category    = "deep_learning"
@@ -597,13 +509,9 @@ class EnvAutoencoderScore(BaseAlgorithm):
         return error.astype(float)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CATEGORY 7 — ENVIRONMENTAL FEATURE ENGINEERING  (3 algorithms)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class EnvPCAScore(BaseAlgorithm):
-    """PCA environmental gradient: first principal component score."""
     name        = "Env PCA Score"
     service_id  = 3
     category    = "feature_engineering"
@@ -627,7 +535,6 @@ class EnvPCAScore(BaseAlgorithm):
 
 @registry.register
 class EnvICAHabitatComponents(BaseAlgorithm):
-    """ICA habitat components: independent environmental signals."""
     name        = "Env ICA Habitat Components"
     service_id  = 3
     category    = "feature_engineering"
@@ -643,7 +550,6 @@ class EnvICAHabitatComponents(BaseAlgorithm):
         Xs, _ = _subsample_env(X, None, max_n=20000)
         E = _env_features(Xs)
         self.ica.fit(E)
-        # Find the component least correlated with speed (col 0) — the "habitat novelty" axis
         components_train = self.ica.transform(E)
         speed_col = Xs[:, 0]
         corrs = np.abs([np.corrcoef(components_train[:, i], speed_col)[0, 1]
@@ -653,14 +559,12 @@ class EnvICAHabitatComponents(BaseAlgorithm):
         return self
 
     def predict(self, X):
-        # Score = magnitude of the speed-independent ICA component (habitat novelty)
         components = self.ica.transform(_env_features(X))
         return np.abs(components[:, self.novelty_idx_]).astype(float)
 
 
 @registry.register
 class EnvNMFHabitatParts(BaseAlgorithm):
-    """NMF habitat parts: additive terrain/vegetation/energy decomposition."""
     name        = "Env NMF Habitat Parts"
     service_id  = 3
     category    = "feature_engineering"
@@ -678,7 +582,6 @@ class EnvNMFHabitatParts(BaseAlgorithm):
         E_pos = E - E.min(axis=0) + 1e-6
         self.E_min_ = E.min(axis=0)
         self.nmf.fit(E_pos)
-        # Find the NMF component most correlated with altitude (col 1) — terrain part
         parts_train = self.nmf.transform(E_pos)
         alt_col = Xs[:, 1]
         corrs = np.abs([np.corrcoef(parts_train[:, i], alt_col)[0, 1]
@@ -692,17 +595,12 @@ class EnvNMFHabitatParts(BaseAlgorithm):
         E_pos = E - self.E_min_ + 1e-6
         E_pos = np.clip(E_pos, 0, None)
         parts = self.nmf.transform(E_pos)
-        # Score = terrain/elevation-driven habitat part only
         return parts[:, self.terrain_idx_].astype(float)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CATEGORY 8 — ENSEMBLE / HYBRID  (3 algorithms)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class EnvVotingRegressor(BaseAlgorithm):
-    """Voting Regressor: averages RF, GBM, and Ridge predictions."""
     name        = "Env Voting Regressor"
     service_id  = 3
     category    = "ensemble"
@@ -730,7 +628,6 @@ class EnvVotingRegressor(BaseAlgorithm):
 
 @registry.register
 class EnvBaggingRegressor(BaseAlgorithm):
-    """Bagging Regressor: bootstrap aggregation over decision trees."""
     name        = "Env Bagging Regressor"
     service_id  = 3
     category    = "ensemble"
@@ -754,7 +651,6 @@ class EnvBaggingRegressor(BaseAlgorithm):
 
 @registry.register
 class EnvLightGBMRegressor(BaseAlgorithm):
-    """LightGBM: fastest histogram-based gradient boosting."""
     name        = "Env LightGBM Regressor"
     service_id  = 3
     category    = "ensemble"
@@ -784,13 +680,9 @@ class EnvLightGBMRegressor(BaseAlgorithm):
         return self.model.predict(_env_features(X)).astype(float)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CATEGORY 9 — CAUSAL / EXPLAINABLE  (3 algorithms)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class EnvHuberRegressor(BaseAlgorithm):
-    """Huber regression: robust to GPS position outliers."""
     name        = "Env Huber Regressor"
     service_id  = 3
     category    = "causal_explainable"
@@ -814,7 +706,6 @@ class EnvHuberRegressor(BaseAlgorithm):
 
 @registry.register
 class EnvPermutationImportanceScore(BaseAlgorithm):
-    """Permutation importance: which env feature drives speed the most."""
     name        = "Env Permutation Importance Score"
     service_id  = 3
     category    = "causal_explainable"
@@ -843,7 +734,6 @@ class EnvPermutationImportanceScore(BaseAlgorithm):
 
 @registry.register
 class EnvGrangerCausalScore(BaseAlgorithm):
-    """Granger causal proxy: lagged cross-correlation altitude → speed."""
     name        = "Env Granger Causal Score"
     service_id  = 3
     category    = "causal_explainable"
@@ -859,7 +749,6 @@ class EnvGrangerCausalScore(BaseAlgorithm):
     def fit(self, X, y=None):
         score = _env_score(X)
         alt   = X[:, 1]
-        # Find lag that maximises cross-correlation
         correlations = [
             abs(np.corrcoef(alt[:-lag], score[lag:])[0, 1])
             for lag in range(1, self.max_lag + 1)
@@ -873,19 +762,14 @@ class EnvGrangerCausalScore(BaseAlgorithm):
         n     = len(score)
         out   = np.zeros(n, dtype=float)
         lag   = self._best_lag
-        # Score at each point = env score `lag` steps ago (lagged influence)
         out[lag:] = score[:n - lag]
         out[:lag] = score[0]
         return out.astype(float)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CATEGORY 10 — ADVANCED SUPERVISED  (4 algorithms)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @registry.register
 class EnvSGDRegressor(BaseAlgorithm):
-    """SGD Regressor: online learning, scales to any dataset size."""
     name        = "Env SGD Regressor"
     service_id  = 3
     category    = "ml_supervised"
@@ -909,7 +793,6 @@ class EnvSGDRegressor(BaseAlgorithm):
 
 @registry.register
 class EnvElasticNet(BaseAlgorithm):
-    """Elastic Net: combined L1+L2 regularisation for correlated env features."""
     name        = "Env Elastic Net"
     service_id  = 3
     category    = "ml_supervised"
@@ -933,7 +816,6 @@ class EnvElasticNet(BaseAlgorithm):
 
 @registry.register
 class EnvStackingRegressor(BaseAlgorithm):
-    """Stacking Regressor: meta-learner on top of RF, GBM, and Ridge."""
     name        = "Env Stacking Regressor"
     service_id  = 3
     category    = "ensemble"
@@ -965,7 +847,6 @@ class EnvStackingRegressor(BaseAlgorithm):
 
 @registry.register
 class EnvCatBoostRegressor(BaseAlgorithm):
-    """CatBoost: gradient boosting optimised for categorical env features."""
     name        = "Env CatBoost Regressor"
     service_id  = 3
     category    = "ensemble"
@@ -995,6 +876,3 @@ class EnvCatBoostRegressor(BaseAlgorithm):
         return self.model.predict(_env_features(X)).astype(float)
 
 
-# ── End of file ──────────────────────────────────────────────────────────────
-# Total algorithms: 25 across 7 categories
-# Service ID: 3 — Environmental Factors (Sarah)
